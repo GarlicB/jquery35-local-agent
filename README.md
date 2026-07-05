@@ -1,0 +1,42 @@
+# jquery35-local-agent
+
+**폐쇄망에서 Node.js 하나로 돌아가는 jQuery CVE-2020-11023 조치 자동화 도구**
+(레거시 Java/Spring/JSP 프로젝트용 · npm install 불필요 · 인터넷 불필요 · 외부 의존성 0)
+
+오래된 사내 웹(Spring 3.x + JSP + jQuery 1.x)에서 jQuery를 3.5+로 올려야 할 때 필요한 전 과정을 로컬에서 처리합니다:
+**전수 정적분석 → 안전 자동수정(TO-BE 생성) → jQuery 3.7.1 + Migrate 교체 → 화면용 Runtime Probe → mock Lab 서버 → 운영 반영 전 게이트 검사 → 보고서**.
+
+## 특징
+
+- **원본 무수정 원칙** — 모든 변경은 `--target` TO-BE 폴더에만 생성. 원본과 diff로 비교 후 반영.
+- **오탐을 줄인 스캐너** — 단순 정규식이 아니라 토큰 마스킹(주석/문자열/정규식 제거) + 리시버 체인 역추적 + 괄호균형 인자 파서 + 파일 내 taint 추적(ajax 콜백 파라미터 → DOM sink 승격) + 전 프로젝트 콜사이트 타입 추론(AutoFixed2).
+- **안전한 것만 자동수정** — `.bind→.on`, `.size()→.length`, boolean `.attr→.prop` 등 jQuery 1.x/3.x 양쪽에서 동작하는 선제 변경만. `.html(response)` 같은 XSS 후보는 절대 자동수정하지 않고 분류만.
+- **폐쇄망/구형 환경 대응** — Edge IE mode(개발자도구 제한)용 ES5 Runtime Probe, EUC-KR 파일 바이트 보존(latin1 round-trip), CSV/XLS 보고서를 npm 없이 직접 생성.
+- **자체 검증 내장** — `--mode self-test`가 임시 샘플 프로젝트를 만들어 전체 사이클(44개 체크)을 검증.
+
+## 빠른 시작
+
+```bat
+node run-jquery35-v5.js --mode self-test
+
+node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode plan
+```
+
+이후 `report\index.html` 대시보드를 열어 현황을 확인하고, `README_FIRST.txt`의 6단계 순서(분석 → 자동수정 → jQuery 교체 → Probe → Lab → verify-clean)를 따라가면 됩니다.
+Windows 사용자는 동봉된 `실행1_분석만.bat` ~ `실행6_운영반영전검증.bat`의 상단 경로만 수정해 실행하세요.
+
+## 문서
+
+- [README_KO.md](README_KO.md) — 전체 매뉴얼 (판정 기준, 모드 설명, Bitbucket/Bamboo 플로우, FAQ)
+- [RUN_EXAMPLES_KO.txt](RUN_EXAMPLES_KO.txt) — 명령 예시 모음
+- [README_FIRST.txt](README_FIRST.txt) — 빠른 시작
+
+문서의 모든 경로(`C:\work\legacy-app` 등)는 예시입니다. 실제 프로젝트 경로로 바꿔 사용하세요.
+
+## 요구사항
+
+Node.js (LTS 아무 버전). 그게 전부입니다.
+
+## 라이선스
+
+MIT

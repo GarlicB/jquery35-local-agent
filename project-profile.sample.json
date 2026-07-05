@@ -1,0 +1,45 @@
+{
+  "webContentDir": "WebContent",
+  "pathVariables": {
+    "${js}": "/js",
+    "${css}": "/css",
+    "${images}": "/images",
+    "${img}": "/images",
+    "${context}": "",
+    "${ctx}": "",
+    "${pageContext.request.contextPath}": "",
+    "${request.contextPath}": ""
+  },
+  "vendorPatterns": [
+    "resources/jqgrid/",
+    "jquery-ui",
+    "jquery.ui",
+    "select2",
+    "autoNumeric",
+    "jqgrid",
+    "jquery.jqGrid",
+    "grid.locale"
+  ],
+  "appScriptHints": [
+    "js/util.js",
+    "js/common.js"
+  ],
+  "ignoreAttrPatterns": [
+    "aria-disabled",
+    "aria-selected"
+  ],
+  "jquery": {
+    "targetVersion": "3.7.1",
+    "migrateVersion": "3.6.0",
+    "coreFile": "jquery-3.7.1.min.js",
+    "migrateFile": "jquery-migrate-3.6.0.min.js",
+    "newJquerySrc": "",
+    "newMigrateSrc": ""
+  },
+  "probe": {
+    "enabled": true,
+    "injectTargetHints": [
+      "WEB-INF/layouts/common_script_lib.jsp"
+    ]
+  }
+}

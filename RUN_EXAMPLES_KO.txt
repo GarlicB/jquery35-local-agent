@@ -1,0 +1,45 @@
+jquery35-local-agent v5 - 명령 예시 모음
+=========================================
+
+도움말:
+  node run-jquery35-v5.js --help
+
+1) 분석만 (원본/TO-BE 아무것도 수정 안 함):
+  node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode plan
+
+2) TO-BE 자동수정 (안전 항목만):
+  node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode autofix
+
+3) jQuery 호출부 교체 (사전에 WebContent\js 에 jquery-3.7.1.min.js, jquery-migrate-3.6.0.min.js 배치):
+  node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode patch-jquery
+
+4) Runtime Probe 삽입:
+  node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode probe
+
+5) 로컬 mock lab 서버:
+  node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode lab --port 18080
+  접속: http://localhost:18080/_pages
+  보고서: http://localhost:18080/_report/index.html
+
+6) 운영 반영 전 검증 (TO-BE 또는 반영된 브랜치 작업본을 source로):
+  node run-jquery35-v5.js --source "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5_clean" --mode verify-clean
+  exit code: 0=PASS/WARN, 2=FAIL (Bamboo 게이트로 사용 가능)
+  WARN도 실패로 처리: --warn-as-error
+
+7) PR/Bamboo 보고서:
+  node run-jquery35-v5.js --source "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5_pr" --mode pr-report
+
+8) assistant_packet만 재생성:
+  node run-jquery35-v5.js --source "C:\work\legacy-app" --report "C:\work\jquery35_report_v5" --mode packet
+
+9) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 44개 체크):
+  node run-jquery35-v5.js --mode self-test
+
+유용한 옵션:
+  --profile "C:\work\legacy-app\project-profile.json"   경로변수/벤더패턴/프로브 대상 커스터마이즈
+  --jquery-version 3.7.1 --migrate-version 3.6.0   교체 버전 변경
+  --inject-probe                                    autofix/patch-jquery 때 프로브도 같이 삽입
+  --patch-jquery                                    autofix 때 core 교체도 같이 수행
+  --safe-packet false / --include-snippets          packet에 짧은 코드조각 포함
+  --max-packet-lines 600                            packet 줄수 제한 조정
+  --no-lab                                          mock_routes.json 생성 생략
