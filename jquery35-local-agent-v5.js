@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.0.0";
+const TOOL_VERSION = "5.1.0";
 const DEFAULT_JQUERY_VERSION = "3.7.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
 const CVE_ID = "CVE-2020-11023";
@@ -718,6 +718,55 @@ function classifySinkArg(origArg, maskedArg, ctx) {
   return { kind: "review", why: "dynamic value of unknown origin: " + trunc(t, 60) };
 }
 
+const VOID_TAGS = { area: 1, base: 1, br: 1, col: 1, embed: 1, hr: 1, img: 1, input: 1, link: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1 };
+const SELF_CLOSED_RE = /<([a-zA-Z][a-zA-Z0-9-]*)\s*\/>/g;
+
+function selfClosedHits(str) {
+  const hits = [];
+  SELF_CLOSED_RE.lastIndex = 0;
+  let m;
+  while ((m = SELF_CLOSED_RE.exec(str)) !== null) {
+    if (!VOID_TAGS[m[1].toLowerCase()]) hits.push(m[1]);
+  }
+  return hits;
+}
+
+function expandSelfClosed(str) {
+  return str.replace(SELF_CLOSED_RE, function (whole, tag) {
+    return VOID_TAGS[tag.toLowerCase()] ? whole : "<" + tag + "></" + tag + ">";
+  });
+}
+
+function checkSelfClosedArgs(model, ctx, absFn, args, methodLabel) {
+  args.forEach(function (a) {
+    const hits = selfClosedHits(a.orig);
+    if (hits.length === 0) return;
+    const inner = a.orig.replace(/^['"`]|['"`]$/g, "").trim();
+    if (/^<[a-zA-Z][a-zA-Z0-9-]*\s*\/>$/.test(inner)) return;
+    const ids = (a.masked.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) || []).filter(function (x) { return !/^(true|false|null|undefined)$/.test(x); });
+    const pureLiteral = ids.length === 0 && /^["']/.test(a.orig) && !/`/.test(a.orig);
+    if (pureLiteral) {
+      addFinding(model, ctx, {
+        idx: absFn(a.s), category: "self-closed-tag", pattern: methodLabel + " <" + hits[0] + "/>",
+        priority: "AutoFixed", confidence: "High", action: "Changed",
+        before: trunc(a.orig, 160), after: trunc(expandSelfClosed(a.orig), 160),
+        reason: "jQuery 3.5 security fix (" + CVE_ID + ") stopped auto-expanding self-closed tags in HTML strings; explicit closing tags keep identical behavior on both old and new jQuery (Migrate does not restore this by default)",
+        commitGroup: "AUTO_SAFE",
+        editStart: absFn(a.s), editEnd: absFn(a.e), replacement: expandSelfClosed(a.rawOrig)
+      });
+    } else {
+      addFinding(model, ctx, {
+        idx: absFn(a.s), category: "self-closed-tag", pattern: methodLabel + " <" + hits[0] + "/>",
+        priority: "Review", confidence: "Medium", action: "ReviewOnly",
+        before: trunc(a.orig, 160),
+        reason: "self-closed non-void tag <" + hits[0] + "/> inside dynamically built HTML: since jQuery 3.5 it is no longer expanded to <" + hits[0] + "></" + hits[0] + ">, so following siblings become children; rewrite with explicit closing tags",
+        suggestion: "write <" + hits[0] + "></" + hits[0] + "> explicitly",
+        commitGroup: "AUTO_SAFE"
+      });
+    }
+  });
+}
+
 function collectTaint(ctx, masked, base) {
   const res = [
     /success\s*:\s*function\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)/g,
@@ -779,7 +828,7 @@ function scanRegion(model, ctx, start, end) {
     if (closeIdx < 0) continue;
     const argSpans = splitTopArgs(masked, parenIdx + 1, closeIdx);
     const args = argSpans.map(function (sp) {
-      return { orig: O(sp.s, sp.e).trim(), masked: masked.slice(sp.s, sp.e).trim(), s: sp.s, e: sp.e };
+      return { orig: O(sp.s, sp.e).trim(), rawOrig: O(sp.s, sp.e), masked: masked.slice(sp.s, sp.e).trim(), s: sp.s, e: sp.e };
     });
     const recv = receiverInfo(masked, orig, dotIdx);
     const jq = isJqReceiver(recv);
@@ -942,6 +991,7 @@ function scanRegion(model, ctx, start, end) {
     if (name === "html" || name === "append" || name === "prepend" || name === "before" || name === "after" || name === "replaceWith") {
       if (args.length === 0) continue;
       if ((name === "before" || name === "after") && !jq && !recv.base) continue;
+      checkSelfClosedArgs(model, ctx, abs, args, "." + name + "(");
       let worst = { kind: "static" };
       for (let ai = 0; ai < args.length; ai++) {
         const cls = classifySinkArg(args[ai].orig, args[ai].masked, ctx);
@@ -1011,6 +1061,7 @@ function scanRegion(model, ctx, start, end) {
         commitGroup: "AUTO_SAFE"
       });
     } else if (util === "parseHTML") {
+      checkSelfClosedArgs(model, ctx, abs, [{ orig: argOrig, rawOrig: O(parenIdx + 1, closeIdx), masked: argMasked, s: parenIdx + 1, e: closeIdx }], "$.parseHTML(");
       const cls = classifySinkArg(argOrig, argMasked, ctx);
       if (cls.kind === "static") {
         addFinding(model, ctx, {
@@ -1046,6 +1097,7 @@ function scanRegion(model, ctx, start, end) {
     const inner = a0o.replace(/^['"`]|['"`]$/g, "");
     if (!/^\s*</.test(inner) && !/['"`]\s*</.test(a0o)) continue;
     const fIdx = abs(m.index + m[0].length - (m[2] === "$" ? 2 : 7) - 0);
+    checkSelfClosedArgs(model, ctx, abs, [{ orig: a0o, rawOrig: O(spans[0].s, spans[0].e), masked: a0m, s: spans[0].s, e: spans[0].e }], "$(");
     const cls = classifySinkArg(a0o, a0m, ctx);
     if (cls.kind === "static") {
       addFinding(model, ctx, {
@@ -1583,10 +1635,10 @@ function analyzeSyntax(model) {
 }
 
 const VENDOR_RECOMMEND = {
-  "jquery-ui": "check jQuery UI version compatibility with jQuery 3.x (1.12.1+ recommended); test datepicker/dialog/button/tabs/autocomplete",
-  "jqgrid": "do not hand-edit; test grid rendering, paging, sort, search, inline edit, pager, formatter, subgrid under jQuery 3.x + Migrate; consider free-jqGrid or version upgrade",
-  "select2": "test placeholder, ajax search, multiple select, initial value binding",
-  "autoNumeric": "test amount input, comma formatting, blur/focus, saved value, readonly/disabled",
+  "jquery-ui": "jQuery UI <= 1.12.1 has its OWN CVEs (CVE-2021-41182/41183/41184 datepicker XSS, CVE-2022-31160); security scanners flag it even after jQuery core upgrade - move to jQuery UI 1.13.2+ (supports jQuery 3.x), then test datepicker/dialog/button/tabs/autocomplete",
+  "jqgrid": "do not hand-edit; classic trirand jqGrid 4.x predates jQuery 3 - plan replacement with free-jqGrid 4.15.x or its maintained fork (jQuery 3.x support) or Guriddo jqGrid 5.5.4+ (commercial, official jQuery 3.5 support); until swapped, test rendering/paging/sort/search/inline edit/formatter/subgrid under Migrate and watch JQMIGRATE warnings from grid files",
+  "select2": "select2 4.0.8+ fixed jQuery 3.x compatibility (4.0.5 had focus/multiselect bugs under jQuery 3); 3.5.x line is unmaintained - test placeholder, ajax search, multiple select, initial value binding, or plan upgrade to 4.0.13",
+  "autoNumeric": "old autoNumeric 1.x reported working under jQuery 3.x; v4+ is jQuery-free standalone if replacement ever needed; test amount input, comma formatting, blur/focus, saved value, readonly/disabled",
   "datepicker": "test open/close, locale, min/max date under jQuery 3.x",
   "bootstrap": "check bootstrap js version vs jQuery 3.x compatibility",
   "jquery-validate": "test form validation trigger/messages under jQuery 3.x",
@@ -2695,6 +2747,7 @@ const ST_LIST_JSP = [
   '  $("#chk").attr("checked", true);',
   '  $("#inp").removeAttr("readonly");',
   '  $("#inp2").attr("readonly", "true");',
+  '  $("#z").append("<div/><span>zz</span>");',
   "});",
   "function initPage(){ }",
   "</script>",
@@ -2792,6 +2845,7 @@ function selfTest(opts) {
     check("removeAttr readonly -> prop false", listTobe.indexOf('.prop("readonly", false)') >= 0, "");
     check("attr readonly true-string -> prop true", listTobe.indexOf('.prop("readonly", true)') >= 0, "");
     check(".html(response) NOT auto-changed", listTobe.indexOf('$("#grid").html(response)') >= 0, "");
+    check("self-closed tag expanded (jQuery 3.5 htmlPrefilter)", listTobe.indexOf('append("<div></div><span>zz</span>")') >= 0, trunc(listTobe, 300));
     const layoutTobe = readLatin1(path.join(t1, "WebContent", "WEB-INF", "layouts", "common_script_lib.jsp"));
     check("old jquery NOT swapped in autofix", layoutTobe.indexOf("jquery-1.10.2.min.js") >= 0, "");
     const vendorTobe = readLatin1(path.join(t1, "WebContent", "resources", "jqgrid", "js", "jquery.jqGrid.min.js"));
