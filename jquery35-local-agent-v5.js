@@ -15,7 +15,7 @@ const PROBE_FILE_NAME = "jquery35-test-probe.js";
 const PROBE_MARKER = "JQUERY35_RUNTIME_PROBE";
 const PAGE_EXTS = [".jsp", ".jspx", ".html", ".htm", ".tag", ".tagx", ".inc", ".xhtml"];
 const TEXT_EXTS = PAGE_EXTS.concat([".js", ".css"]);
-const EXCLUDE_DIRS = { ".git": 1, ".svn": 1, ".hg": 1, "node_modules": 1, "target": 1, "build": 1, "dist": 1, ".idea": 1, ".settings": 1 };
+const EXCLUDE_DIRS = Object.assign(Object.create(null), { ".git": 1, ".svn": 1, ".hg": 1, "node_modules": 1, "target": 1, "build": 1, "dist": 1, ".idea": 1, ".settings": 1 });
 const MODES = ["plan", "autofix", "patch-jquery", "probe", "lab", "verify-clean", "pr-report", "packet", "self-test"];
 
 const DEFAULT_PATH_VARS = {
@@ -38,20 +38,20 @@ const DEFAULT_VENDOR_PATTERNS = [
 
 const DEFAULT_APP_HINTS = ["js/util.js", "js/common.js"];
 const DEFAULT_IGNORE_ATTR_PATTERNS = ["aria-"];
-const BOOL_ATTRS = { disabled: 1, readonly: 1, checked: 1, selected: 1 };
+const BOOL_ATTRS = Object.assign(Object.create(null), { disabled: 1, readonly: 1, checked: 1, selected: 1 });
 
-const TAINT_NAMES = {};
+const TAINT_NAMES = Object.create(null);
 ["response", "responsetext", "result", "resultdata", "data", "html", "content",
   "input", "value", "msg", "message", "param", "params", "title", "name",
   "formatted", "returnvalue", "doctypeselect", "cardlist", "alter", "altername",
   "json", "list", "rows", "body", "text", "resp", "res"].forEach(function (n) { TAINT_NAMES[n] = 1; });
 
-const SKIP_CALLBACK_BASES = { console: 1, window: 1, Math: 1, JSON: 1, logger: 1, log: 1, alert: 1 };
+const SKIP_CALLBACK_BASES = Object.assign(Object.create(null), { console: 1, window: 1, Math: 1, JSON: 1, logger: 1, log: 1, alert: 1 });
 
-const PRIORITY_RANK = {
+const PRIORITY_RANK = Object.assign(Object.create(null), {
   Critical: 90, XssHigh: 80, Manual: 70, Review: 60,
   AutoFixed2: 50, AutoFixed: 40, VendorReview: 30, StaticHtmlLow: 20, Ignored: 10
-};
+});
 
 function log(msg) { process.stdout.write("[jq35] " + msg + "\n"); }
 function warn(msg) { process.stdout.write("[jq35][WARN] " + msg + "\n"); }
@@ -718,7 +718,7 @@ function classifySinkArg(origArg, maskedArg, ctx) {
   return { kind: "review", why: "dynamic value of unknown origin: " + trunc(t, 60) };
 }
 
-const VOID_TAGS = { area: 1, base: 1, br: 1, col: 1, embed: 1, hr: 1, img: 1, input: 1, link: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1 };
+const VOID_TAGS = Object.assign(Object.create(null), { area: 1, base: 1, br: 1, col: 1, embed: 1, hr: 1, img: 1, input: 1, link: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1 });
 const SELF_CLOSED_RE = /<([a-zA-Z][a-zA-Z0-9-]*)\s*\/>/g;
 
 function selfClosedHits(str) {
@@ -1347,8 +1347,8 @@ function buildModel(opts, mode) {
     sourceRoot: sourceRoot, webContentRoot: webContentRoot,
     targetRoot: targetRoot, reportRoot: reportRoot,
     targetWcRoot: targetRoot ? path.join(targetRoot, path.relative(sourceRoot, webContentRoot)) : "",
-    allFiles: [], textFiles: [], ctxByRel: {}, fileIndex: {},
-    findings: [], defs: {}, pages: [],
+    allFiles: [], textFiles: [], ctxByRel: Object.create(null), fileIndex: Object.create(null),
+    findings: [], defs: Object.create(null), pages: [],
     pageScriptRows: [], pageCssRows: [], includeRows: [], unresolvedRows: [],
     effectiveRows: [], oldCoreRefs: [], jqueryLoadRows: [],
     ajaxRows: [], syntaxRows: [], probeInjections: [], patchResults: [],
@@ -1388,7 +1388,7 @@ function analyze(model) {
       text: text, lineStarts: lineStartsOf(text), eol: detectEol(text),
       lib: lib, isVendor: lib !== "app" && lib !== "probe",
       isMin: isMinifiedFile(f.rel, text),
-      findings: [], edits: [], regions: [], taint: {}, refs: null
+      findings: [], edits: [], regions: [], taint: Object.create(null), refs: null
     };
     if (ctx.isMin && !ctx.isVendor) ctx.isVendor = true;
     model.textFiles.push(ctx);
