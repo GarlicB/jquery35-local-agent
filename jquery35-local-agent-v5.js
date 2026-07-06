@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.1.0";
+const TOOL_VERSION = "5.2.0";
 const DEFAULT_JQUERY_VERSION = "3.7.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
 const CVE_ID = "CVE-2020-11023";
@@ -16,7 +16,7 @@ const PROBE_MARKER = "JQUERY35_RUNTIME_PROBE";
 const PAGE_EXTS = [".jsp", ".jspx", ".html", ".htm", ".tag", ".tagx", ".inc", ".xhtml"];
 const TEXT_EXTS = PAGE_EXTS.concat([".js", ".css"]);
 const EXCLUDE_DIRS = Object.assign(Object.create(null), { ".git": 1, ".svn": 1, ".hg": 1, "node_modules": 1, "target": 1, "build": 1, "dist": 1, ".idea": 1, ".settings": 1 });
-const MODES = ["plan", "autofix", "patch-jquery", "probe", "lab", "verify-clean", "pr-report", "packet", "self-test"];
+const MODES = ["plan", "autofix", "patch-jquery", "probe", "lab", "verify-clean", "pr-report", "packet", "review-pack", "self-test"];
 
 const DEFAULT_PATH_VARS = {
   "${js}": "/js",
@@ -67,6 +67,7 @@ function isDir(p) { try { return fs.statSync(p).isDirectory(); } catch (e) { ret
 function toPosix(p) { return String(p).split(path.sep).join("/"); }
 function trunc(s, n) { s = String(s == null ? "" : s).replace(/[\r\n\t]+/g, " "); return s.length > n ? s.slice(0, n) + "..." : s; }
 function uniq(arr) { const seen = {}; const out = []; arr.forEach(function (a) { if (!seen[a]) { seen[a] = 1; out.push(a); } }); return out; }
+function positiveIntOpt(raw, def) { const n = parseInt(raw, 10); return (Number.isFinite(n) && n > 0) ? n : def; }
 function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function htmlEsc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function xmlEsc(s) { return htmlEsc(s).replace(/'/g, "&apos;").replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ""); }
@@ -407,7 +408,10 @@ function defaultProfile() {
     probe: {
       enabled: true,
       injectTargetHints: ["WEB-INF/layouts/common_script_lib.jsp"]
-    }
+    },
+    learnedWrappers: [],
+    learnedFindings: [],
+    sensitiveIdentifiers: []
   };
 }
 
@@ -427,6 +431,9 @@ function loadProfile(opts, sourceRoot) {
       if (Array.isArray(raw.ignoreAttrPatterns)) prof.ignoreAttrPatterns = raw.ignoreAttrPatterns;
       if (raw.jquery) Object.assign(prof.jquery, raw.jquery);
       if (raw.probe) Object.assign(prof.probe, raw.probe);
+      if (Array.isArray(raw.learnedWrappers)) prof.learnedWrappers = prof.learnedWrappers.concat(raw.learnedWrappers);
+      if (Array.isArray(raw.learnedFindings)) prof.learnedFindings = prof.learnedFindings.concat(raw.learnedFindings);
+      if (Array.isArray(raw.sensitiveIdentifiers)) prof.sensitiveIdentifiers = raw.sensitiveIdentifiers;
       log("profile loaded: " + profPath);
     } catch (e) {
       warn("profile parse failed, using defaults: " + e.message);
@@ -489,6 +496,9 @@ function helpText() {
     "  verify-clean  pre-release gate: fail on old jQuery / probe leftovers / criticals",
     "  pr-report     generate pr_description.md, bamboo_checklist.md, recommended_commits.txt",
     "  packet        analyze + write assistant_packet.txt / chat_summary.txt only",
+    "  review-pack   analyze + write ai_review_pack.txt/json: a bounded, redacted",
+    "                questionnaire over the most ambiguous/high-leverage code spots,",
+    "                meant to be copy-pasted to an external AI and iterated on",
     "  self-test     build a sample project in temp dir and validate the tool end-to-end",
     "",
     "Options:",
@@ -497,7 +507,8 @@ function helpText() {
     "  --report <dir>            report output dir",
     "  --mode <mode>             see modes above (default: plan)",
     "  --port <n>                lab server port (default 18080)",
-    "  --profile <file>          project-profile.json path",
+    "  --profile <file>          project-profile.json path (also carries learnedWrappers/",
+    "                            learnedFindings from a previous review-pack round)",
     "  --jquery-version <v>      default " + DEFAULT_JQUERY_VERSION,
     "  --migrate-version <v>     default " + DEFAULT_MIGRATE_VERSION,
     "  --inject-probe            also inject probe in autofix/patch-jquery mode",
@@ -506,6 +517,9 @@ function helpText() {
     "  --safe-packet [true|false]  exclude code snippets from assistant_packet (default true)",
     "  --include-snippets        include short snippets in packet (overrides safe-packet)",
     "  --max-packet-lines <n>    packet line cap (default 400)",
+    "  --max-review-cases <n>    review-pack: max distinct cases per round (default 20)",
+    "  --context-lines <n>       review-pack: excerpt lines shown before/after (default 3)",
+    "  --max-review-lines <n>    review-pack: ai_review_pack.txt line cap (default 300)",
     "  --no-lab                  skip mock_routes.json / mock_data_default.json generation",
     "  --warn-as-error           verify-clean returns exit 1 on WARN",
     "  --help                    this help",
@@ -691,11 +705,28 @@ function addFinding(model, ctx, o) {
   return f;
 }
 
+function isSafeWrapperCall(masked, ctx) {
+  const model = ctx && ctx.model;
+  if (!model || !model.wrapperNames || model.wrapperNames.length === 0) return false;
+  const t = masked.trim();
+  for (let i = 0; i < model.wrapperNames.length; i++) {
+    const name = model.wrapperNames[i];
+    if (!model.safeWrapperNames[name]) continue;
+    const m = t.match(new RegExp("^" + escapeRe(name) + "\\s*\\("));
+    if (!m) continue;
+    const openIdx = m[0].length - 1;
+    const closeIdx = matchParen(t, openIdx);
+    if (closeIdx === t.length - 1) return true;
+  }
+  return false;
+}
+
 function classifySinkArg(origArg, maskedArg, ctx) {
   const orig = origArg.trim();
   const masked = maskedArg;
   if (!orig) return { kind: "empty" };
   if (/\$\{[^}]*\}/.test(orig) || /<%=/.test(orig)) return { kind: "xss", why: "server-side EL/JSP expression concatenated into HTML" };
+  if (isSafeWrapperCall(masked, ctx)) return { kind: "static", why: "wrapped by a learned safe helper function" };
   const ids = masked.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) || [];
   const realIds = ids.filter(function (x) { return !/^(true|false|null|undefined|new|function|this|typeof|var|let|const|return|if|else)$/.test(x); });
   if (realIds.length === 0) {
@@ -782,6 +813,29 @@ function collectTaint(ctx, masked, base) {
   });
 }
 
+function collectWrapperTaint(model, ctx, masked, base) {
+  if (!model.wrapperNames || model.wrapperNames.length === 0) return;
+  model.wrapperNames.forEach(function (name) {
+    const rule = model.wrapperRules[name];
+    if (!rule || rule.role !== "ajaxSuccessJson") return;
+    if (masked.indexOf(name) < 0) return;
+    const re = rule.callRe;
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(masked)) !== null) {
+      const parenIdx = m.index + m[0].length - 1;
+      const closeIdx = matchParen(masked, parenIdx);
+      if (closeIdx < 0) continue;
+      const spans = splitTopArgs(masked, parenIdx + 1, closeIdx);
+      const pIdx = typeof rule.calleeParamIndex === "number" ? rule.calleeParamIndex : spans.length - 1;
+      if (pIdx < 0 || pIdx >= spans.length) continue;
+      const argMasked = masked.slice(spans[pIdx].s, spans[pIdx].e).trim();
+      const fm = argMasked.match(/^function\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)/);
+      if (fm) ctx.taint[fm[1]] = true;
+    }
+  });
+}
+
 function collectDefs(model, ctx, masked, base) {
   const res = [
     /function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(([^)]*)\)\s*\{/g,
@@ -807,14 +861,22 @@ function collectDefs(model, ctx, masked, base) {
   });
 }
 
-function scanRegion(model, ctx, start, end) {
+function premaskRegion(model, ctx, start, end) {
   const orig = ctx.text.slice(start, end);
-  if (!orig.trim()) return;
+  if (!orig.trim()) return null;
   const masked = maskJs(orig, false);
-  ctx.regions.push({ start: start, end: end, masked: masked });
+  const region = { start: start, end: end, masked: masked, orig: orig };
+  ctx.regions.push(region);
   collectTaint(ctx, masked, start);
+  collectWrapperTaint(model, ctx, masked, start);
   collectDefs(model, ctx, masked, start);
+  return region;
+}
 
+function scanRegionFindings(model, ctx, region) {
+  const orig = region.orig;
+  const masked = region.masked;
+  const start = region.start;
   const O = function (s, e) { return orig.slice(s, e); };
   const abs = function (i) { return start + i; };
 
@@ -997,6 +1059,7 @@ function scanRegion(model, ctx, start, end) {
         const cls = classifySinkArg(args[ai].orig, args[ai].masked, ctx);
         if (cls.kind === "xss") { worst = cls; break; }
         if (cls.kind === "review" && worst.kind !== "xss") worst = cls;
+        if (cls.kind === "static" && worst.kind === "static" && cls.why && !worst.why) worst = cls;
       }
       if (worst.kind === "empty") continue;
       if (worst.kind === "static") {
@@ -1004,7 +1067,7 @@ function scanRegion(model, ctx, start, end) {
           idx: fIdx, category: "dom-sink", pattern: "." + name + "(static)",
           priority: "StaticHtmlLow", confidence: "High", action: "Ignored",
           before: callText,
-          reason: "static HTML literal only, no dynamic data",
+          reason: worst.why || "static HTML literal only, no dynamic data",
           commitGroup: "STATIC_LOW"
         });
       } else if (worst.kind === "xss") {
@@ -1028,6 +1091,49 @@ function scanRegion(model, ctx, start, end) {
       }
       continue;
     }
+  }
+
+  if (model.wrapperNames && model.wrapperNames.length > 0) {
+    model.wrapperNames.forEach(function (wname) {
+      const rule = model.wrapperRules[wname];
+      if (!rule || rule.role !== "domSinkArg") return;
+      if (masked.indexOf(wname) < 0) return;
+      const wrapRe = rule.callRe;
+      wrapRe.lastIndex = 0;
+      let wm;
+      while ((wm = wrapRe.exec(masked)) !== null) {
+        const wIdx = abs(wm.index + wm[1].length);
+        const parenIdx = wm.index + wm[0].length - 1;
+        const closeIdx = matchParen(masked, parenIdx);
+        if (closeIdx < 0) continue;
+        const spans = splitTopArgs(masked, parenIdx + 1, closeIdx);
+        const pIdx = typeof rule.sinkParamIndex === "number" ? rule.sinkParamIndex : 0;
+        if (pIdx < 0 || pIdx >= spans.length) continue;
+        const argOrig = O(spans[pIdx].s, spans[pIdx].e).trim();
+        const argMasked = masked.slice(spans[pIdx].s, spans[pIdx].e).trim();
+        if (!argOrig) continue;
+        const cls = classifySinkArg(argOrig, argMasked, ctx);
+        const callText = trunc(wname + O(parenIdx, closeIdx + 1), 160);
+        if (cls.kind === "xss") {
+          addFinding(model, ctx, {
+            idx: wIdx, category: "wrapper-dom-sink", pattern: wname + "(dynamic)",
+            priority: "XssHigh", confidence: "Medium", action: "ReviewOnly",
+            before: callText,
+            reason: "learned wrapper '" + wname + "' treated as DOM HTML sink: " + (cls.why || ""),
+            suggestion: "verify " + wname + "'s internal .html()/.append() usage; prefer .text() for data",
+            commitGroup: "DOM_XSS"
+          });
+        } else if (cls.kind === "review") {
+          addFinding(model, ctx, {
+            idx: wIdx, category: "wrapper-dom-sink", pattern: wname + "(object)",
+            priority: "Review", confidence: "Low", action: "ReviewOnly",
+            before: callText,
+            reason: "learned wrapper '" + wname + "' DOM sink argument: " + (cls.why || ""),
+            commitGroup: "DOM_XSS"
+          });
+        }
+      }
+    });
   }
 
   const utilRe = /(\$|jQuery)\s*\.\s*(trim|parseHTML|browser)\b/g;
@@ -1068,7 +1174,7 @@ function scanRegion(model, ctx, start, end) {
           idx: fIdx, category: "parse-html", pattern: "$.parseHTML(static)",
           priority: "StaticHtmlLow", confidence: "High", action: "Ignored",
           before: trunc(O(m.index, closeIdx + 1), 120),
-          reason: "static HTML literal", commitGroup: "STATIC_LOW"
+          reason: cls.why || "static HTML literal", commitGroup: "STATIC_LOW"
         });
       } else {
         addFinding(model, ctx, {
@@ -1104,7 +1210,7 @@ function scanRegion(model, ctx, start, end) {
         idx: abs(parenIdx), category: "dom-factory", pattern: "$(static html)",
         priority: "StaticHtmlLow", confidence: "High", action: "Ignored",
         before: trunc("$(" + a0o + ")", 120),
-        reason: "static DOM factory literal", commitGroup: "STATIC_LOW"
+        reason: cls.why || "static DOM factory literal", commitGroup: "STATIC_LOW"
       });
     } else if (cls.kind === "xss") {
       addFinding(model, ctx, {
@@ -1353,7 +1459,9 @@ function buildModel(opts, mode) {
     effectiveRows: [], oldCoreRefs: [], jqueryLoadRows: [],
     ajaxRows: [], syntaxRows: [], probeInjections: [], patchResults: [],
     changed: {}, editWarnings: [], git: null, counters: {}, focus: [],
-    scriptInv: [], pluginInv: [], dirInv: [], completeRows: [], needsRows: []
+    scriptInv: [], pluginInv: [], dirInv: [], completeRows: [], needsRows: [],
+    wrapperRules: Object.create(null), wrapperNames: [], safeWrapperNames: Object.create(null),
+    learnedFindingsMap: Object.create(null), reviewCases: [], reviewCasesAll: 0, reviewRound: 1
   };
   if (targetRoot && isUnderDir(targetRoot, sourceRoot)) warn("target is inside source; it will be excluded from scan");
   if (reportRoot && isUnderDir(reportRoot, sourceRoot)) warn("report is inside source; it will be excluded from scan");
@@ -1361,6 +1469,8 @@ function buildModel(opts, mode) {
 }
 
 function analyze(model) {
+  buildWrapperRules(model);
+  buildLearnedFindingsMap(model);
   const excl = [];
   if (model.targetRoot) excl.push(model.targetRoot);
   if (model.reportRoot) excl.push(model.reportRoot);
@@ -1388,7 +1498,8 @@ function analyze(model) {
       text: text, lineStarts: lineStartsOf(text), eol: detectEol(text),
       lib: lib, isVendor: lib !== "app" && lib !== "probe",
       isMin: isMinifiedFile(f.rel, text),
-      findings: [], edits: [], regions: [], taint: Object.create(null), refs: null
+      findings: [], edits: [], regions: [], taint: Object.create(null), refs: null,
+      model: model
     };
     if (ctx.isMin && !ctx.isVendor) ctx.isVendor = true;
     model.textFiles.push(ctx);
@@ -1399,22 +1510,130 @@ function analyze(model) {
   model.textFiles.forEach(function (ctx) {
     if (ctx.isPage) {
       ctx.refs = collectPageStructure(ctx);
-      ctx.refs.inlineRegions.forEach(function (rg) { scanRegion(model, ctx, rg.start, rg.end); });
+      const regions = ctx.refs.inlineRegions.map(function (rg) { return premaskRegion(model, ctx, rg.start, rg.end); }).filter(Boolean);
+      regions.forEach(function (region) { scanRegionFindings(model, ctx, region); });
     } else if (ctx.isJs) {
-      scanRegion(model, ctx, 0, ctx.text.length);
+      const region = premaskRegion(model, ctx, 0, ctx.text.length);
+      if (region) scanRegionFindings(model, ctx, region);
     }
     done++;
     if (done % 100 === 0) log("scanned " + done + "/" + model.textFiles.length);
   });
   resolveAutoFixed2(model);
+  annotateGroupKeys(model);
+  applyLearnedFindingsOverrides(model);
   analyzePages(model);
   analyzeAjax(model);
   analyzeSyntax(model);
   buildInventories(model);
   dedupFindings(model);
   buildQueues(model);
+  buildReviewCases(model);
   model.git = gitInfo(model.sourceRoot);
   summarize(model);
+}
+
+function buildWrapperRules(model) {
+  const rules = Object.create(null);
+  const safe = Object.create(null);
+  const names = [];
+  (model.profile.learnedWrappers || []).forEach(function (w) {
+    if (!w || !w.name) return;
+    const prev = rules[w.name];
+    const rule = {
+      name: w.name,
+      role: w.role || "unknown",
+      calleeParamIndex: typeof w.calleeParamIndex === "number" ? w.calleeParamIndex : null,
+      sinkParamIndex: typeof w.sinkParamIndex === "number" ? w.sinkParamIndex : 0,
+      notes: w.notes || "",
+      callRe: new RegExp("(^|[^A-Za-z0-9_$.])" + escapeRe(w.name) + "\\s*\\(", "g")
+    };
+    if (prev && prev.role !== rule.role) {
+      warn("learnedWrappers: '" + w.name + "' role changed " + prev.role + " -> " + rule.role + " (later entry in project-profile.json wins)");
+    }
+    rules[w.name] = rule;
+    if (names.indexOf(w.name) < 0) names.push(w.name);
+    safe[w.name] = rule.role === "safeWrapper";
+  });
+  model.wrapperRules = rules;
+  model.wrapperNames = names;
+  model.safeWrapperNames = safe;
+}
+
+function buildLearnedFindingsMap(model) {
+  const map = Object.create(null);
+  (model.profile.learnedFindings || []).forEach(function (e) {
+    if (!e || !e.caseId) return;
+    map[e.caseId] = e;
+  });
+  model.learnedFindingsMap = map;
+}
+
+function caseIdOf(kind, name) {
+  let h1 = 0, h2 = 0;
+  const s = kind + ":" + name;
+  for (let i = 0; i < s.length; i++) {
+    h1 = (h1 * 31 + s.charCodeAt(i)) >>> 0;
+    h2 = (h2 * 131 + s.charCodeAt(i) + 7) >>> 0;
+  }
+  return kind + "-" + h1.toString(36).padStart(7, "0") + h2.toString(36).padStart(7, "0");
+}
+
+function findEnclosingDefName(model, f) {
+  if (f.idx === undefined || f.idx === null) return null;
+  const ctx = model.ctxByRel[f.rel];
+  if (!ctx) return null;
+  let best = null;
+  Object.keys(model.defs).forEach(function (nm) {
+    model.defs[nm].forEach(function (d) {
+      if (d.ctx !== ctx) return;
+      if (f.idx <= d.bodyStart || f.idx >= d.bodyEnd) return;
+      if (!best || d.bodyStart > best.bodyStart) best = d;
+    });
+  });
+  return best ? best.name : null;
+}
+
+function annotateGroupKeys(model) {
+  model.findings.forEach(function (f) {
+    if (f._caseId) return;
+    const encl = findEnclosingDefName(model, f);
+    f._groupKind = encl ? "FN" : "PT";
+    f._groupName = encl || (f.category + "@" + f.rel);
+    f._caseId = caseIdOf(f._groupKind, f._groupName);
+  });
+}
+
+const LEARNED_DECISION_MAP = {
+  "xss-high": { priority: "XssHigh", action: "ReviewOnly" },
+  "manual": { priority: "Manual", action: "ReviewOnly" },
+  "review": { priority: "Review", action: "ReviewOnly" },
+  "static-safe": { priority: "StaticHtmlLow", action: "Ignored" },
+  "vendor-review": { priority: "VendorReview", action: "ReviewOnly" },
+  "ignored": { priority: "Ignored", action: "Ignored" }
+};
+
+function applyLearnedFindingsOverrides(model) {
+  if (!model.learnedFindingsMap || Object.keys(model.learnedFindingsMap).length === 0) return;
+  const warnedCaseIds = Object.create(null);
+  model.findings.forEach(function (f) {
+    if (f.thirdParty === "Y") return;
+    if (f.action === "Changed") return;
+    const entry = model.learnedFindingsMap[f._caseId];
+    if (!entry || !entry.decision) return;
+    if (entry.name && entry.name !== f._groupName) {
+      if (!warnedCaseIds[f._caseId]) {
+        warnedCaseIds[f._caseId] = true;
+        warn("learnedFindings caseId " + f._caseId + " expected name '" + entry.name + "' but matched '" + f._groupName + "'; skipped as a precaution (possible hash mismatch or stale answer)");
+      }
+      return;
+    }
+    const dec = LEARNED_DECISION_MAP[entry.decision];
+    if (!dec) return;
+    f.priority = dec.priority;
+    f.action = dec.action;
+    f.reason = trunc("[learned:" + entry.decision + "] " + (entry.notes || "") + " | " + f.reason, 300);
+  });
 }
 
 function analyzePages(model) {
@@ -1736,6 +1955,215 @@ function buildQueues(model) {
   });
 }
 
+function isAmbiguousFinding(f) {
+  if (f.thirdParty === "Y") return false;
+  if (f.priority === "Review") return true;
+  if (f.priority === "Manual") return true;
+  if (f.priority === "XssHigh" && f.confidence !== "High") return true;
+  if (f.category === "jquery-core-unknown") return true;
+  return false;
+}
+
+function countCallSites(model, name) {
+  const re = new RegExp("(^|[^A-Za-z0-9_$.])" + escapeRe(name) + "\\s*\\(", "g");
+  let n = 0;
+  model.textFiles.forEach(function (c2) {
+    c2.regions.forEach(function (rg) {
+      re.lastIndex = 0;
+      while (re.exec(rg.masked) !== null) n++;
+    });
+  });
+  return n;
+}
+
+const REVIEW_QUESTIONS = Object.assign(Object.create(null), {
+  "jqxhr-shorthand": "이 콜백은 AJAX 성공/에러 콜백인가요? 콜백의 첫 인자는 항상 서버에서 온 JSON/데이터인가요? (A: AJAX 성공, B: AJAX 에러, C: DOM 이벤트, D: 모름)",
+  "dom-sink": "이 인자 값은 어디서 오나요? (A: 서버 응답/AJAX 콜백, B: 사용자 입력, C: 내부에서 안전하게 생성된 값, D: 알 수 없음) HTML 태그가 실제로 섞여 들어갈 수 있나요? (Y/N/모름)",
+  "wrapper-dom-sink": "이 래퍼 함수가 내부적으로 jQuery .html()/.append()를 쓰나요? 인자로 들어오는 값이 서버 데이터인가요? (Y/N/모름)",
+  "dom-factory": "이 문자열이 항상 고정 literal인가요, 아니면 조합되나요? (A: 고정, B: 조합, C: 모름)",
+  "parse-html": "parseHTML에 들어가는 문자열이 서버 응답을 포함하나요? (Y/N/모름)",
+  "bool-attr-variable": "이 변수가 실제로 가질 수 있는 값은 무엇인가요? (예: Y/N, true/false, 1/0, 기타 - 적어주세요)",
+  "trim-deprecated": "$.trim 인자가 항상 문자열인가요, 아니면 null/undefined가 올 수 있나요? (A: 항상 문자열, B: null 가능, C: 모름)",
+  "jquery-core-unknown": "이 jQuery 파일의 실제 버전을 알고 있나요? (버전 문자열 또는 '모름')",
+  "live-die": "이 selector가 동적으로 추가되는 요소를 대상으로 하나요? (Y/N/모름)",
+  "js-syntax": "이 파일이 실제로 구형 IE 전용 문법(conditional comments 등)을 쓰나요, 아니면 다른 이유로 파싱이 실패했나요?"
+});
+function questionFor(category) {
+  return REVIEW_QUESTIONS[category] || "이 코드의 역할은 무엇인가요? (자유 설명)";
+}
+
+function bucketOf(len) {
+  if (len > 30) return "long";
+  if (len > 8) return "med";
+  return "short";
+}
+
+function redactSourceText(text) {
+  const n = text.length;
+  const out = [];
+  let i = 0;
+  let lastSig = "";
+  let lastWord = "";
+  let prevWasWord = false;
+  const REGEX_WORDS = Object.assign(Object.create(null), { "return": 1, "typeof": 1, "instanceof": 1, "in": 1, "of": 1, "new": 1, "delete": 1, "void": 1, "case": 1, "do": 1, "else": 1, "throw": 1 });
+  while (i < n) {
+    const c = text[i];
+    const d = i + 1 < n ? text[i + 1] : "";
+    if (c === "<" && text.slice(i, i + 4) === "<%--") {
+      let j = i + 4;
+      let nl = 0;
+      while (j < n && text.slice(j, j + 3) !== "--%>") { if (text[j] === "\n") nl++; j++; }
+      if (j < n) j += 3;
+      out.push("<%--<COMMENT>--%>" + "\n".repeat(nl));
+      i = j;
+      continue;
+    }
+    if (c === "/" && d === "/") {
+      while (i < n && text[i] !== "\n") i++;
+      out.push("//<COMMENT>");
+      continue;
+    }
+    if (c === "/" && d === "*") {
+      let j = i + 2;
+      let nl = 0;
+      while (j < n && !(text[j] === "*" && text[j + 1] === "/")) { if (text[j] === "\n") nl++; j++; }
+      if (j < n) j += 2;
+      out.push("/*<COMMENT>*/" + "\n".repeat(nl));
+      i = j;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      const q = c;
+      i++;
+      let len = 0;
+      while (i < n) {
+        if (text[i] === "\\" && i + 1 < n) { len += 2; i += 2; continue; }
+        if (text[i] === q) { i++; break; }
+        if (text[i] === "\n") break;
+        len++; i++;
+      }
+      out.push(q + "<STR:" + bucketOf(len) + ">" + q);
+      lastSig = q; prevWasWord = false;
+      continue;
+    }
+    if (c === "`") {
+      i++;
+      let len = 0;
+      let nl = 0;
+      while (i < n) {
+        if (text[i] === "\\" && i + 1 < n) { len += 2; i += 2; continue; }
+        if (text[i] === "`") { i++; break; }
+        if (text[i] === "\n") nl++;
+        len++; i++;
+      }
+      out.push("`<STR:" + bucketOf(len) + ">`" + "\n".repeat(nl));
+      lastSig = "`"; prevWasWord = false;
+      continue;
+    }
+    if (c === "/") {
+      let regexOk = false;
+      if (lastSig === "") regexOk = true;
+      else if ("(,=:[!&|?{};+-*%~^<>".indexOf(lastSig) >= 0) regexOk = true;
+      else if (/[A-Za-z0-9_$]/.test(lastSig) && REGEX_WORDS[lastWord]) regexOk = true;
+      if (regexOk) {
+        i++;
+        let inClass = false;
+        let bailed = false;
+        while (i < n) {
+          if (text[i] === "\\" && i + 1 < n) { i += 2; continue; }
+          if (text[i] === "[") { inClass = true; i++; continue; }
+          if (text[i] === "]") { inClass = false; i++; continue; }
+          if (text[i] === "/" && !inClass) { i++; break; }
+          if (text[i] === "\n") { bailed = true; break; }
+          i++;
+        }
+        if (!bailed) {
+          while (i < n && /[a-z]/i.test(text[i])) i++;
+          out.push("/<REGEX>/");
+          lastSig = "/"; prevWasWord = false;
+          continue;
+        }
+      }
+    }
+    out.push(c);
+    if (/\s/.test(c)) {
+      prevWasWord = false;
+    } else {
+      lastSig = c;
+      if (/[A-Za-z0-9_$]/.test(c)) { lastWord = prevWasWord ? lastWord + c : c; prevWasWord = true; }
+      else { lastWord = ""; prevWasWord = false; }
+    }
+    i++;
+  }
+  return out.join("");
+}
+
+function applySensitiveIdentifiers(model, line) {
+  let out = line;
+  (model.profile.sensitiveIdentifiers || []).forEach(function (nm, i) {
+    if (!nm) return;
+    out = out.replace(new RegExp("(?<![A-Za-z0-9])" + escapeRe(nm) + "(?![A-Za-z0-9])", "gi"), "VAR" + (i + 1));
+  });
+  return out;
+}
+
+function excerptFor(model, ctx, idx, contextLines) {
+  const line = lineOf(ctx.lineStarts, idx || 0);
+  if (!ctx._redactedLines) {
+    ctx._redactedLines = redactSourceText(ctx.text).split("\n");
+  }
+  const totalLines = ctx._redactedLines.length;
+  const lo = Math.max(1, line - contextLines);
+  const hi = Math.min(totalLines, line + contextLines);
+  const out = [];
+  for (let ln = lo; ln <= hi; ln++) {
+    const raw = (ctx._redactedLines[ln - 1] || "").replace(/\r$/, "");
+    out.push((ln === line ? ">> " : "   ") + ln + ": " + applySensitiveIdentifiers(model, raw));
+  }
+  return out.join("\n");
+}
+
+function buildReviewCases(model) {
+  const ambiguous = model.findings.filter(isAmbiguousFinding);
+  const groups = Object.create(null);
+  ambiguous.forEach(function (f) {
+    const key = f._caseId;
+    if (!groups[key]) {
+      groups[key] = { caseId: key, kind: f._groupKind, name: f._groupName, findings: [], categories: Object.create(null) };
+    }
+    groups[key].findings.push(f);
+    groups[key].categories[f.category] = (groups[key].categories[f.category] || 0) + 1;
+  });
+  let list = Object.keys(groups).map(function (k) { return groups[k]; });
+  const weight = Object.assign(Object.create(null), { Manual: 3, XssHigh: 3, Review: 2, Critical: 4 });
+  list.forEach(function (g) {
+    g.weightBase = g.findings.reduce(function (s, f) { return s + (weight[f.priority] || 1); }, 0);
+  });
+  list.sort(function (a, b) { return b.weightBase - a.weightBase; });
+  const maxCases = positiveIntOpt(model.opts["max-review-cases"], 20);
+  const preTop = list.slice(0, Math.max(maxCases * 3, maxCases));
+  preTop.forEach(function (g) {
+    g.fanout = g.kind === "FN" ? countCallSites(model, g.name) : 0;
+    g.score = g.weightBase * (1 + Math.log2(1 + g.fanout));
+  });
+  preTop.sort(function (a, b) { return b.score - a.score; });
+  const top = preTop.slice(0, maxCases);
+  const contextLines = positiveIntOpt(model.opts["context-lines"], 3);
+  top.forEach(function (g) {
+    const rep = g.findings[0];
+    const ctx = model.ctxByRel[rep.rel];
+    g.repFile = rep.rel;
+    g.repLine = rep.line;
+    g.excerpt = ctx ? excerptFor(model, ctx, rep.idx || 0, contextLines) : "(no excerpt available)";
+    g.topCategories = Object.keys(g.categories).sort(function (a, b) { return g.categories[b] - g.categories[a]; }).slice(0, 2);
+    g.question = questionFor(g.topCategories[0]);
+    g.sampleLocations = uniq(g.findings.map(function (f) { return f.rel + ":" + f.line; })).slice(0, 5);
+    g.count = g.findings.length;
+  });
+  model.reviewCases = top;
+  model.reviewCasesAll = list.length;
+}
+
 function summarize(model) {
   const c = {};
   const P = ["Critical", "AutoFixed", "AutoFixed2", "Review", "Manual", "XssHigh", "VendorReview", "StaticHtmlLow", "Ignored"];
@@ -1777,7 +2205,11 @@ function summarize(model) {
     JsSyntaxFail: model.syntaxRows.filter(function (r) { return r.result === "FAIL"; }).length,
     LibraryCounts: JSON.stringify(libCounts),
     GitInfo: model.git && model.git.available ? (model.git.branch + " changed=" + model.git.changed.length + " untracked=" + model.git.untracked.length) : "Unavailable",
-    OldJquerySrcs: model.oldCoreRefs.map(function (r) { return r.page + ":" + r.line + ":" + r.raw; }).join(" | ")
+    OldJquerySrcs: model.oldCoreRefs.map(function (r) { return r.page + ":" + r.line + ":" + r.raw; }).join(" | "),
+    ReviewCasesTotal: model.reviewCasesAll,
+    ReviewCasesInPack: model.reviewCases.length,
+    LearnedWrapperCount: model.wrapperNames.length,
+    LearnedFindingOverrides: Object.keys(model.learnedFindingsMap || {}).length
   };
 }
 
@@ -2212,6 +2644,14 @@ function writeIndexHtml(model) {
   let lc = {};
   try { lc = JSON.parse(c.LibraryCounts); } catch (e) { }
   parts.push(tableHtml(["라이브러리", "JS 파일 수"], Object.keys(lc).map(function (k) { return [k, lc[k]]; })));
+  if (model.reviewCasesAll > 0) {
+    parts.push("<h2>AI 리뷰팩 (애매한 코드 " + model.reviewCasesAll + "그룹 중 상위 " + model.reviewCases.length + "건)</h2>");
+    parts.push(tableHtml(["CaseId", "종류", "이름", "호출부수", "건수", "현재분류", "질문"],
+      model.reviewCases.slice(0, 20).map(function (g) {
+        return [g.caseId, g.kind === "FN" ? "함수" : "패턴", g.name, g.fanout, g.count, g.findings[0].priority, trunc(g.question, 60)];
+      })));
+    parts.push('<div class="small">--mode review-pack 실행 시 ai_review_pack.txt/json이 생성됩니다. 코드 원문 없이 함수명/앞뒤 몇 줄만 담겨 외부 AI에게 전달 가능하며, 답변을 project-profile.json에 병합하면 다음 라운드에 자동 반영됩니다.</div>');
+  }
   parts.push("<h2>다음 액션</h2><ol>");
   recommendedActions(model).forEach(function (a) { parts.push("<li>" + htmlEsc(a) + "</li>"); });
   parts.push("</ol>");
@@ -2229,6 +2669,7 @@ function recommendedActions(model) {
   if (c.XssHigh > 0) out.push("XssHigh " + c.XssHigh + "건 DOM XSS 검토: .text()/escapeHtml 적용 또는 신뢰 경계 확인 (jQuery 업그레이드만으로는 미해결)");
   if (c.VendorReview > 0) out.push("벤더 라이브러리(jqGrid/jquery-ui/select2/autoNumeric)는 직접 수정하지 말고 Migrate 상태에서 화면 테스트 및 호환 버전 검토");
   if (c.PageRiskMigrateMissing > 0) out.push("Migrate 누락 페이지 " + c.PageRiskMigrateMissing + "건에 jquery-migrate 추가");
+  if (c.Manual + c.Review > 5) out.push("review-pack 모드로 애매한 코드 지점(현재 " + c.ReviewCasesTotal + "그룹) 질문지를 뽑아 외부 AI와 반복 학습 (learnedWrappers/learnedFindings로 project-profile.json에 누적)");
   out.push("probe 모드로 Runtime Probe를 삽입해 Edge IE mode에서 JQMIGRATE 경고/JS 오류를 화면에서 수집");
   out.push("운영 반영 전 verify-clean 모드 실행 (probe 잔존/구버전 jQuery 잔존 시 FAIL)");
   return out;
@@ -2243,6 +2684,7 @@ function packetLines(model) {
     "ChangedFiles", "ApiFindings", "Critical", "AutoFixed", "AutoFixed2", "Review", "Manual", "XssHigh", "FocusQueue",
     "VendorReview", "StaticHtmlLow", "JqueryLoads", "OldJqueryBelow350", "PageRiskMultipleJqueryCore",
     "PageRiskOldJqueryCore", "PageRiskMigrateMissing", "UnresolvedRefs", "AjaxEndpoints", "JsSyntaxFail",
+    "ReviewCasesTotal", "ReviewCasesInPack", "LearnedWrapperCount", "LearnedFindingOverrides",
     "LibraryCounts", "GitInfo", "OldJquerySrcs"].forEach(function (k) {
       L.push(k + "=" + c[k]);
     });
@@ -2275,7 +2717,7 @@ function packetLines(model) {
   L.push("");
   L.push("RecommendedNextActions:");
   recommendedActions(model).forEach(function (a, i) { L.push("  " + (i + 1) + ". " + a); });
-  const cap = parseInt(model.opts["max-packet-lines"], 10) || 400;
+  const cap = positiveIntOpt(model.opts["max-packet-lines"], 400);
   if (L.length > cap) {
     const kept = L.slice(0, cap - 1);
     kept.push("...(truncated " + (L.length - cap + 1) + " lines, adjust with --max-packet-lines)");
@@ -2460,8 +2902,132 @@ function writeSampleProfile(model) {
       newJquerySrc: "",
       newMigrateSrc: ""
     },
-    probe: { enabled: true, injectTargetHints: ["WEB-INF/layouts/common_script_lib.jsp"] }
+    probe: { enabled: true, injectTargetHints: ["WEB-INF/layouts/common_script_lib.jsp"] },
+    learnedWrappers: [],
+    learnedFindings: [],
+    sensitiveIdentifiers: []
   }, null, 2), false);
+}
+
+const REVIEW_PROGRESS_HEADER = ["Round", "TotalAmbiguousGroups", "CasesInPack", "FocusQueue", "Manual", "Review", "XssHigh", "SourceFingerprint"];
+
+function sourceFingerprint(model) {
+  let h = 0;
+  const s = model.allFiles.map(function (f) { return f.rel + ":" + f.size; }).sort().join("|");
+  for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) >>> 0; }
+  return h.toString(36).padStart(7, "0");
+}
+
+function writeReviewProgress(model) {
+  const file = path.join(model.reportRoot, "review_loop_progress.csv");
+  const headerLine = REVIEW_PROGRESS_HEADER.map(csvCell).join(",");
+  let round = 1;
+  let rows = [];
+  let targetFile = file;
+  let prevFingerprint = "";
+  if (exists(file)) {
+    try {
+      const prevText = readUtf8(file).replace(/^\uFEFF/, "");
+      const prevLines = prevText.split(/\r?\n/).filter(Boolean);
+      if (prevLines.length > 0 && prevLines[0] === headerLine) {
+        rows = prevLines.slice(1);
+        round = rows.length + 1;
+        if (rows.length > 0) {
+          const lastCols = rows[rows.length - 1].split(",");
+          prevFingerprint = lastCols[lastCols.length - 1] || "";
+        }
+      } else if (prevLines.length > 0) {
+        const bak = file.replace(/\.csv$/, "") + ".schema-mismatch." + prevLines.length + "rows.bak.csv";
+        try {
+          fs.renameSync(file, bak);
+          warn("review_loop_progress.csv had a different/older column layout; moved old file to " + path.basename(bak) + " and started a fresh round 1");
+        } catch (e2) {
+          warn("review_loop_progress.csv had a different/older column layout and could not be backed up (" + e2.message + "); writing to review_loop_progress.new.csv instead of overwriting it");
+          targetFile = file.replace(/\.csv$/, "") + ".new.csv";
+        }
+      }
+    } catch (e) {
+      warn("review_loop_progress.csv could not be read (" + e.message + "); writing to review_loop_progress.new.csv instead of silently discarding round history");
+      targetFile = file.replace(/\.csv$/, "") + ".new.csv";
+    }
+  }
+  model.reviewRound = round;
+  const fp = sourceFingerprint(model);
+  if (round > 1 && prevFingerprint && prevFingerprint !== fp) {
+    warn("source tree changed since the previous review-pack round (fingerprint " + prevFingerprint + " -> " + fp + "); caseIds for edited files may no longer line up with earlier learnedFindings answers");
+  }
+  const row = [round, model.reviewCasesAll, model.reviewCases.length, model.counters.FocusQueue, model.counters.Manual, model.counters.Review, model.counters.XssHigh, fp].map(csvCell).join(",");
+  rows.push(row);
+  writeUtf8(targetFile, [headerLine].concat(rows).join("\r\n") + "\r\n", true);
+}
+
+function writeReviewPack(model) {
+  writeReviewProgress(model);
+  const R = model.reportRoot;
+  ensureDir(R);
+  const L = [];
+  L.push("JQUERY35_AI_REVIEW_PACK v" + TOOL_VERSION);
+  L.push("SourceRoot=" + model.sourceRoot);
+  L.push("Round=" + model.reviewRound);
+  L.push("TotalAmbiguousGroups=" + model.reviewCasesAll);
+  L.push("CasesInThisPack=" + model.reviewCases.length);
+  L.push("");
+  L.push("이 파일은 폐쇄망 코드 전체가 아니라, 애매하게 분류된 코드 지점 " + model.reviewCases.length + "곳의 함수명/앞뒤 몇 줄만 담고 있습니다.");
+  L.push("문자열 내용은 <STR:길이등급>으로 대체되어 실제 값이 들어있지 않습니다. 하나의 CASE에 답하면 그 지식이 관련된 모든 호출부(FanOut)에 한번에 적용됩니다.");
+  L.push("답변은 맨 아래 'ANSWER FORMAT'에 맞춰 JSON을 작성해 project-profile.json에 병합한 뒤, 같은 --report 폴더로 --mode review-pack (또는 plan)을 다시 실행하세요.");
+  L.push("");
+  model.reviewCases.forEach(function (g, i) {
+    L.push("---- CASE " + (i + 1) + "/" + model.reviewCases.length + " : " + g.caseId + " ----");
+    L.push("Kind=" + (g.kind === "FN" ? "function:" + g.name : "pattern:" + g.name));
+    if (g.kind === "FN") L.push("CallSiteCount(approx)=" + g.fanout);
+    L.push("OccurrencesInThisGroup=" + g.count + " (showing up to 5 locations)");
+    g.sampleLocations.forEach(function (loc) { L.push("  - " + loc); });
+    L.push("DominantCategories=" + g.topCategories.join(", "));
+    L.push("CurrentClassification=" + g.findings[0].priority + " (confidence " + g.findings[0].confidence + ")");
+    L.push("Excerpt:");
+    L.push(g.excerpt);
+    L.push("Question: " + g.question);
+    L.push("");
+  });
+  L.push("---- ANSWER FORMAT (이 형태의 JSON을 만들어 project-profile.json에 병합하세요) ----");
+  L.push(JSON.stringify({
+    learnedWrappers: [
+      { caseId: "예: FN-a1b2c3", name: "함수명", role: "ajaxSuccessJson 또는 domSinkArg 또는 safeWrapper", calleeParamIndex: 1, sinkParamIndex: 0, notes: "판단 근거" }
+    ],
+    learnedFindings: [
+      { caseId: "예: PT-9f8e7d...(위 CASE의 caseId 그대로)", name: "위 CASE의 Kind= 뒤에 나온 이름 그대로 (예: showResult) - 대조용, 선택이지만 권장", decision: "xss-high 또는 review 또는 manual 또는 static-safe 또는 vendor-review 또는 ignored", notes: "판단 근거" }
+    ]
+  }, null, 2));
+  L.push("");
+  L.push("참고: learnedWrappers는 이 함수/래퍼의 모든 호출부에 규칙을 전파합니다(자동수정은 하지 않고 분류에만 영향).");
+  L.push("      learnedFindings는 이 CASE 그룹 전체의 분류만 덮어씁니다(마찬가지로 자동수정은 하지 않음).");
+  L.push("      learnedFindings에 name을 함께 적으면, 다음 라운드에서 caseId가 혹시 다른 코드 위치와 겹치더라도 이름이 다르면 적용을 건너뛰고 경고합니다(안전장치).");
+  const capLines = positiveIntOpt(model.opts["max-review-lines"], 300);
+  let lines = L;
+  if (lines.length > capLines) {
+    lines = lines.slice(0, capLines - 1);
+    lines.push("...(truncated " + (L.length - capLines + 1) + " lines, adjust with --max-review-lines)");
+  }
+  writeUtf8(path.join(R, "ai_review_pack.txt"), lines.join("\r\n") + "\r\n", true);
+
+  const jsonOut = {
+    tool: TOOL_NAME, version: TOOL_VERSION, round: model.reviewRound,
+    totalAmbiguousGroups: model.reviewCasesAll,
+    cases: model.reviewCases.map(function (g) {
+      return {
+        caseId: g.caseId, kind: g.kind, name: g.name,
+        fanout: g.fanout, occurrences: g.count,
+        sampleLocations: g.sampleLocations,
+        categories: g.topCategories,
+        currentPriority: g.findings[0].priority,
+        currentConfidence: g.findings[0].confidence,
+        question: g.question,
+        excerpt: g.excerpt
+      };
+    })
+  };
+  writeUtf8(path.join(R, "ai_review_pack.json"), JSON.stringify(jsonOut, null, 2), false);
+  log("review pack: " + model.reviewCases.length + "/" + model.reviewCasesAll + " ambiguous groups (round " + model.reviewRound + ")");
 }
 
 function writeAllReports(model, extra) {
@@ -2778,11 +3344,30 @@ const ST_UTIL_JS = [
   '\t$list.unbind("mouseover");',
   "}",
   "var fn2 = onRow.bind(this);",
+  'var greeting = $.trim(" hi ");',
   "",
   ""
 ].join("\r\n");
 
 const ST_JQGRID_JS = '(function($){$.fn.fakeGrid=function(o){this.bind("click",function(){});this.attr("disabled",true);return this;};})(jQuery);';
+
+const ST_WRAPPER_JS = [
+  "function fnAjaxWrap(url, cb) {",
+  '\t$.ajax({ url: url, dataType: "json" }).success(cb);',
+  "}",
+  "function renderCell(v) {",
+  '\t$("#cellHost").html(v);',
+  "}",
+  "function esc(v) {",
+  "\treturn String(v).replace(/[<>&]/g, \"\");",
+  "}",
+  'fnAjaxWrap("/board/data.do", function(d){',
+  '\t$("#out").html(d);',
+  "});",
+  "renderCell(resultdata);",
+  '$("#msgBox").append(esc(response));',
+  ""
+].join("\r\n");
 
 function selfTest(opts) {
   const base = path.join(os.tmpdir(), "jq35-selftest-" + Date.now());
@@ -2793,6 +3378,7 @@ function selfTest(opts) {
   writeLatin1(path.join(wc, "WEB-INF", "views", "sample", "list.jsp"), ST_LIST_JSP);
   writeLatin1(path.join(wc, "WEB-INF", "views", "common", "second_page.jsp"), ST_SECOND_JSP);
   writeLatin1(path.join(wc, "js", "util.js"), ST_UTIL_JS);
+  writeLatin1(path.join(wc, "js", "wrapper_demo.js"), ST_WRAPPER_JS);
   writeLatin1(path.join(wc, "js", "jquery-1.10.2.min.js"), "/*! jQuery v1.10.2 | (c) fixture */");
   writeLatin1(path.join(wc, "js", "jquery-ui-1.10.4.min.js"), "/*! jQuery UI 1.10.4 fixture */");
   writeLatin1(path.join(wc, "resources", "jqgrid", "js", "jquery.jqGrid.min.js"), ST_JQGRID_JS);
@@ -2806,7 +3392,7 @@ function selfTest(opts) {
     return Object.assign({ _: [], "safe-packet": true, "max-packet-lines": "400" }, extra);
   };
   try {
-    log("self-test 1/6: plan");
+    log("self-test 1/8: plan");
     const t1 = path.join(base, "tobe");
     const r1 = path.join(base, "report");
     const m1 = buildModel(mk({ source: src, target: t1, report: r1 }), "plan");
@@ -2826,7 +3412,7 @@ function selfTest(opts) {
       check("report file " + f, exists(path.join(r1, f)), "");
     });
 
-    log("self-test 2/6: autofix");
+    log("self-test 2/8: autofix");
     const m2 = buildModel(mk({ source: src, target: t1, report: r1 }), "autofix");
     analyze(m2);
     writeTarget(m2, {});
@@ -2851,7 +3437,7 @@ function selfTest(opts) {
     const vendorTobe = readLatin1(path.join(t1, "WebContent", "resources", "jqgrid", "js", "jquery.jqGrid.min.js"));
     check("vendor file untouched", vendorTobe === ST_JQGRID_JS, "");
 
-    log("self-test 3/6: probe (separate target)");
+    log("self-test 3/8: probe (separate target)");
     const t2 = path.join(base, "tobe_probe");
     const m3 = buildModel(mk({ source: src, target: t2, report: r1 }), "probe");
     analyze(m3);
@@ -2860,14 +3446,14 @@ function selfTest(opts) {
     const layoutProbe = readLatin1(path.join(t2, "WebContent", "WEB-INF", "layouts", "common_script_lib.jsp"));
     check("probe injected into layout", layoutProbe.indexOf(PROBE_FILE_NAME) >= 0, "");
 
-    log("self-test 4/6: verify-clean must FAIL on probe target");
+    log("self-test 4/8: verify-clean must FAIL on probe target");
     const rv1 = path.join(base, "report_verify_fail");
     const m4 = buildModel(mk({ source: t2, report: rv1 }), "verify-clean");
     analyze(m4);
     const v1 = doVerifyClean(m4, mk({}));
     check("verify-clean FAIL (old jquery + probe)", v1.code === 2 && v1.failCount >= 2, "code=" + v1.code + " fail=" + v1.failCount);
 
-    log("self-test 5/6: patch-jquery");
+    log("self-test 5/8: patch-jquery");
     writeLatin1(path.join(wc, "js", "jquery-3.7.1.min.js"), "/*! jQuery v3.7.1 fixture */");
     writeLatin1(path.join(wc, "js", "jquery-migrate-3.6.0.min.js"), "/*! jQuery Migrate v3.6.0 fixture */");
     const t3 = path.join(base, "tobe_patch");
@@ -2883,13 +3469,100 @@ function selfTest(opts) {
     check("second page swapped too", secondPatched.indexOf("jquery-3.7.1.min.js") >= 0, "");
     check("second migrate inserted", secondPatched.indexOf("jquery-migrate-3.6.0.min.js") >= 0, "");
 
-    log("self-test 6/6: verify-clean must PASS on patched target");
+    log("self-test 6/8: verify-clean must PASS on patched target");
     fs.rmSync(path.join(t3, "WebContent", "js", "jquery-1.10.2.min.js"), { force: true });
     const rv2 = path.join(base, "report_verify_pass");
     const m6 = buildModel(mk({ source: t3, report: rv2 }), "verify-clean");
     analyze(m6);
     const v2 = doVerifyClean(m6, mk({}));
     check("verify-clean no FAIL on patched target", v2.failCount === 0, "fail=" + v2.failCount + " overall=" + v2.overall);
+
+    log("self-test 7/8: wrapper learning round-trip (ajaxSuccessJson / domSinkArg / safeWrapper)");
+    const rBase = path.join(base, "report_wrapper_baseline");
+    const mBase = buildModel(mk({ source: src, report: rBase }), "plan");
+    analyze(mBase);
+    const wrapBaseFindings = mBase.findings.filter(function (f) { return f.rel === "js/wrapper_demo.js"; });
+    check("baseline: .html(d) inside custom wrapper is Review (not yet tainted)",
+      wrapBaseFindings.some(function (f) { return f.category === "dom-sink" && f.priority === "Review" && /unknown origin: d\b/.test(f.reason); }),
+      JSON.stringify(wrapBaseFindings.map(function (f) { return [f.line, f.category, f.priority, f.reason]; })));
+    check("baseline: renderCell(resultdata) produces NO finding (unknown wrapper is invisible)",
+      !wrapBaseFindings.some(function (f) { return f.category === "wrapper-dom-sink"; }), "");
+    check("baseline: esc(response) is XssHigh (identifier-name false positive)",
+      wrapBaseFindings.some(function (f) { return f.category === "dom-sink" && f.priority === "XssHigh" && f.line === 14; }),
+      JSON.stringify(wrapBaseFindings.map(function (f) { return [f.line, f.category, f.priority]; })));
+
+    const wrapperProfilePath = path.join(base, "learned-profile.json");
+    writeUtf8(wrapperProfilePath, JSON.stringify({
+      learnedWrappers: [
+        { name: "fnAjaxWrap", role: "ajaxSuccessJson", calleeParamIndex: 1, notes: "custom ajax json wrapper" },
+        { name: "renderCell", role: "domSinkArg", sinkParamIndex: 0, notes: "custom cell renderer" },
+        { name: "esc", role: "safeWrapper", notes: "html escape helper" }
+      ]
+    }, null, 2), false);
+    const rLearn = path.join(base, "report_wrapper_learned");
+    const mLearn = buildModel(mk({ source: src, report: rLearn, profile: wrapperProfilePath }), "plan");
+    analyze(mLearn);
+    const wrapLearnFindings = mLearn.findings.filter(function (f) { return f.rel === "js/wrapper_demo.js"; });
+    check("learned: .html(d) reclassified XssHigh via wrapper taint propagation",
+      wrapLearnFindings.some(function (f) { return f.category === "dom-sink" && f.priority === "XssHigh" && /ajax callback parameter 'd'/.test(f.reason); }),
+      JSON.stringify(wrapLearnFindings.map(function (f) { return [f.line, f.category, f.priority, f.reason]; })));
+    check("learned: renderCell(resultdata) now flagged XssHigh via domSinkArg role",
+      wrapLearnFindings.some(function (f) { return f.category === "wrapper-dom-sink" && f.priority === "XssHigh" && f.reason.indexOf("renderCell") >= 0; }),
+      JSON.stringify(wrapLearnFindings.map(function (f) { return [f.line, f.category, f.priority]; })));
+    check("learned: esc(response) downgraded to StaticHtmlLow via safeWrapper role",
+      wrapLearnFindings.some(function (f) { return f.category === "dom-sink" && f.priority === "StaticHtmlLow" && f.line === 14; }),
+      JSON.stringify(wrapLearnFindings.map(function (f) { return [f.line, f.category, f.priority]; })));
+    check("learned rules never set action=Changed (safety invariant)",
+      !wrapLearnFindings.some(function (f) { return (f.category === "dom-sink" || f.category === "wrapper-dom-sink") && f.action === "Changed"; }), "");
+
+    log("self-test 8/8: review-pack round counter + learnedFindings override");
+    const rReview = path.join(base, "report_review_pack");
+    const mR1 = buildModel(mk({ source: src, report: rReview }), "review-pack");
+    analyze(mR1);
+    writeAllReports(mR1, {});
+    writeReviewPack(mR1);
+    check("ai_review_pack.txt created", exists(path.join(rReview, "ai_review_pack.txt")), "");
+    check("ai_review_pack.json created", exists(path.join(rReview, "ai_review_pack.json")), "");
+    const packTxt = readUtf8(path.join(rReview, "ai_review_pack.txt"));
+    check("review pack has marker and at least one CASE", packTxt.indexOf("JQUERY35_AI_REVIEW_PACK") >= 0 && packTxt.indexOf("---- CASE 1/") >= 0, "");
+    check("review pack excerpt redacts string literals", !/hi /.test(packTxt) && packTxt.indexOf("<STR:") >= 0, "");
+    const packJson = JSON.parse(readUtf8(path.join(rReview, "ai_review_pack.json")));
+    check("review pack json cases array non-empty", Array.isArray(packJson.cases) && packJson.cases.length > 0, "");
+    check("round counter starts at 1", mR1.reviewRound === 1, "got " + mR1.reviewRound);
+
+    const mR2 = buildModel(mk({ source: src, report: rReview }), "review-pack");
+    analyze(mR2);
+    writeAllReports(mR2, {});
+    writeReviewPack(mR2);
+    check("round counter increments on second run in same report dir", mR2.reviewRound === 2, "got " + mR2.reviewRound);
+
+    const trimCaseId = caseIdOf("PT", "trim-deprecated@js/util.js");
+    const overridePath = path.join(base, "learned-findings-profile.json");
+    writeUtf8(overridePath, JSON.stringify({
+      learnedFindings: [{ caseId: trimCaseId, decision: "static-safe", notes: "always given a literal string in this codebase" }]
+    }, null, 2), false);
+    const rOverride = path.join(base, "report_override");
+    const mOv = buildModel(mk({ source: src, report: rOverride, profile: overridePath }), "plan");
+    analyze(mOv);
+    const trimFinding = mOv.findings.find(function (f) { return f.rel === "js/util.js" && f.category === "trim-deprecated"; });
+    check("learnedFindings override reclassifies trim-deprecated to StaticHtmlLow",
+      !!trimFinding && trimFinding.priority === "StaticHtmlLow" && trimFinding.action === "Ignored",
+      trimFinding ? JSON.stringify([trimFinding.priority, trimFinding.action, trimFinding.reason]) : "finding not found");
+    check("caseIdOf produces distinct wide ids for adjacent numeric names (no truncation collision)",
+      caseIdOf("FN", "btn0") !== caseIdOf("FN", "btn1") && caseIdOf("FN", "btn1") !== caseIdOf("FN", "btn2"),
+      caseIdOf("FN", "btn0") + " / " + caseIdOf("FN", "btn1") + " / " + caseIdOf("FN", "btn2"));
+
+    const overrideMismatchPath = path.join(base, "learned-findings-mismatch-profile.json");
+    writeUtf8(overrideMismatchPath, JSON.stringify({
+      learnedFindings: [{ caseId: trimCaseId, name: "someUnrelatedFunctionName", decision: "static-safe", notes: "corroboration name deliberately wrong" }]
+    }, null, 2), false);
+    const rMismatch = path.join(base, "report_override_mismatch");
+    const mMismatch = buildModel(mk({ source: src, report: rMismatch, profile: overrideMismatchPath }), "plan");
+    analyze(mMismatch);
+    const trimFindingMismatch = mMismatch.findings.find(function (f) { return f.rel === "js/util.js" && f.category === "trim-deprecated"; });
+    check("learnedFindings override skipped when name corroboration mismatches (safety net)",
+      !!trimFindingMismatch && trimFindingMismatch.priority === "Review" && trimFindingMismatch.action === "ReviewOnly",
+      trimFindingMismatch ? JSON.stringify([trimFindingMismatch.priority, trimFindingMismatch.action]) : "finding not found");
   } catch (e) {
     check("no unexpected exception", false, e.stack || e.message);
   }
@@ -2949,6 +3622,9 @@ function run(argv) {
       writePacket(model);
       writeChatSummary(model);
       log("packet written: " + path.join(model.reportRoot, "assistant_packet.txt"));
+    } else if (mode === "review-pack") {
+      writeAllReports(model, {});
+      writeReviewPack(model);
     }
     const c = model.counters;
     log("");

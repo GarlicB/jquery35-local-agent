@@ -41,5 +41,8 @@
     "injectTargetHints": [
       "WEB-INF/layouts/common_script_lib.jsp"
     ]
-  }
+  },
+  "learnedWrappers": [],
+  "learnedFindings": [],
+  "sensitiveIdentifiers": []
 }

@@ -32,14 +32,20 @@ jquery35-local-agent v5 - 명령 예시 모음
 8) assistant_packet만 재생성:
   node run-jquery35-v5.js --source "C:\work\legacy-app" --report "C:\work\jquery35_report_v5" --mode packet
 
-9) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 44개 체크):
+9) AI 리뷰팩 생성 (스무고개 반복 학습용, 7절 참고. 같은 --report 폴더로 재실행하면 라운드가 누적됨):
+  node run-jquery35-v5.js --source "C:\work\legacy-app" --report "C:\work\jquery35_report_v5" --mode review-pack
+  -> report\ai_review_pack.txt 를 외부 AI에게 붙여넣고, 답변 JSON을 project-profile.json의
+     learnedWrappers/learnedFindings 배열에 병합한 뒤 같은 명령을 다시 실행
+
+10) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 60개 체크):
   node run-jquery35-v5.js --mode self-test
 
 유용한 옵션:
-  --profile "C:\work\legacy-app\project-profile.json"   경로변수/벤더패턴/프로브 대상 커스터마이즈
+  --profile "C:\work\legacy-app\project-profile.json"   경로변수/벤더패턴/프로브 대상/학습된 래퍼 커스터마이즈
   --jquery-version 3.7.1 --migrate-version 3.6.0   교체 버전 변경
   --inject-probe                                    autofix/patch-jquery 때 프로브도 같이 삽입
   --patch-jquery                                    autofix 때 core 교체도 같이 수행
   --safe-packet false / --include-snippets          packet에 짧은 코드조각 포함
   --max-packet-lines 600                            packet 줄수 제한 조정
+  --max-review-cases 20 / --context-lines 3 / --max-review-lines 300   review-pack 분량 조절
   --no-lab                                          mock_routes.json 생성 생략
