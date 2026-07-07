@@ -2882,11 +2882,9 @@ function scopeRoadmapHtml(model) {
     h += '<div class="scopeCard ' + r.tone + '"><div class="scopeTop"><div><div class="scopeTitle">' + htmlEsc(r.title) + '</div><div class="scopeBadge">' + htmlEsc(r.badge) + '</div></div><div class="scopeCount">' + htmlEsc(r.count) + '</div></div><div class="scopeGoal">' + htmlEsc(r.goal) + '</div><div class="scopeLine"><b>할 일</b><br>' + htmlEsc(r.doText) + '</div><div class="scopeLine"><b>멈춤 기준</b><br>' + htmlEsc(r.stop) + '</div></div>';
   });
   h += "</div>";
-  h += '<table class="scopeTable"><thead><tr><th>단계</th><th>현재 건수</th><th>주요 산출물</th><th>의사결정</th></tr></thead><tbody>';
-  rows.forEach(function (r) {
-    h += "<tr><td><b>" + htmlEsc(r.title) + "</b><br><span>" + htmlEsc(r.badge) + "</span></td><td>" + htmlEsc(r.count) + "</td><td>" + r.files.join(" / ") + "</td><td>" + htmlEsc(r.stop) + "</td></tr>";
-  });
-  h += "</tbody></table>";
+  h += '<div class="reportLinks"><b>상세 파일</b> ';
+  h += uniq(rows.reduce(function (acc, r) { return acc.concat(r.files); }, [])).join(" / ");
+  h += "</div>";
   return h;
 }
 function writeIndexHtml(model) {
@@ -2898,32 +2896,27 @@ function writeIndexHtml(model) {
   parts.push(".cards{display:flex;flex-wrap:wrap;gap:10px}.card{background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px 16px;min-width:120px}.card .v{font-size:22px;font-weight:bold}.card .l{font-size:12px;color:#666}");
   parts.push("table{border-collapse:collapse;background:#fff;font-size:12px;margin-top:8px;width:100%}th,td{border:1px solid #ddd;padding:4px 8px;text-align:left;word-break:break-all}th{background:#eef1f6}");
   parts.push(".warn{color:#b26a00}.crit{color:#b00020;font-weight:bold}.ok{color:#1b5e20}.small{font-size:12px;color:#555}");
-  parts.push("a{color:#174ea6}.scopeGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:10px}.scopeCard{background:#fff;border:1px solid #ddd;border-top:4px solid #78909c;border-radius:6px;padding:12px;min-height:178px}.scopeCard.danger{border-top-color:#b00020}.scopeCard.warn{border-top-color:#b26a00}.scopeCard.calm{border-top-color:#546e7a}.scopeTop{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.scopeTitle{font-size:15px;font-weight:bold}.scopeBadge{display:inline-block;margin-top:4px;padding:2px 7px;border:1px solid #ddd;border-radius:999px;font-size:11px;color:#555;background:#f8f9fb}.scopeCount{font-size:28px;font-weight:bold;line-height:1}.scopeGoal{margin-top:10px;font-size:12px;color:#333}.scopeLine{margin-top:9px;font-size:12px;color:#555}.scopeTable td:first-child{width:150px}.scopeTable span{color:#666}@media(max-width:1000px){.scopeGrid{grid-template-columns:1fr}}");
+  parts.push("a{color:#174ea6}.scopeGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:10px}.scopeCard{background:#fff;border:1px solid #ddd;border-top:4px solid #78909c;border-radius:6px;padding:12px;min-height:168px}.scopeCard.danger{border-top-color:#b00020}.scopeCard.warn{border-top-color:#b26a00}.scopeCard.calm{border-top-color:#546e7a}.scopeTop{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.scopeTitle{font-size:15px;font-weight:bold}.scopeBadge{display:inline-block;margin-top:4px;padding:2px 7px;border:1px solid #ddd;border-radius:999px;font-size:11px;color:#555;background:#f8f9fb}.scopeCount{font-size:28px;font-weight:bold;line-height:1}.scopeGoal{margin-top:10px;font-size:12px;color:#333}.scopeLine{margin-top:9px;font-size:12px;color:#555}.reportLinks{margin-top:8px;background:#fff;border:1px solid #ddd;padding:8px 10px;font-size:12px}@media(max-width:1000px){.scopeGrid{grid-template-columns:1fr}}");
   parts.push(".stageFocus{background:#fff;border:1px solid #ddd;border-left:4px solid #78909c;margin-top:12px;padding:10px}.stageFocus.danger{border-left-color:#b00020}.stageFocus.warn{border-left-color:#b26a00}.stageFocus.calm{border-left-color:#546e7a}.stageHead{display:flex;align-items:center;justify-content:space-between;gap:12px}.stageHead b{font-size:14px}.stageHead span{margin-left:8px;font-size:11px;color:#666;border:1px solid #ddd;border-radius:999px;padding:2px 7px;background:#f8f9fb}.stageHead strong{font-size:22px}.emptyQueue{margin-top:8px;border:1px dashed #ccc;background:#fafafa;color:#666;font-size:12px;padding:10px}");
+  parts.push("details{background:#fff;border:1px solid #ddd;margin-top:12px;padding:8px 10px}summary{cursor:pointer;font-weight:bold}.detailBlock{margin-top:10px}");
   parts.push(".filelink{border:0;background:transparent;color:#174ea6;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;padding:0}.modalBackdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;display:none}.modalBox{position:absolute;inset:4%;background:#fff;border:1px solid #444;box-shadow:0 12px 40px rgba(0,0,0,.35);display:flex;flex-direction:column}.modalHead{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #ddd;background:#eef1f6}.modalTitle{font-weight:bold}.modalClose{border:1px solid #999;background:#fff;padding:3px 10px;cursor:pointer}.modalBody{padding:12px;overflow:auto}.detailGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.infoGrid{display:grid;grid-template-columns:130px 1fr;gap:4px 10px;font-size:12px;margin-bottom:12px}.infoGrid div:nth-child(odd){font-weight:bold;color:#555}.pane{border:1px solid #ddd;background:#fafafa}.pane h3{font-size:13px;margin:0;padding:6px 8px;background:#f0f0f0;border-bottom:1px solid #ddd}.codeLine{display:grid;grid-template-columns:46px 1fr;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap}.codeLine .ln{color:#777;text-align:right;padding:0 8px;border-right:1px solid #e0e0e0;user-select:none}.codeLine .txt{padding:0 8px}.codeLine.hit{background:#fff3cd}.noteBox{font:12px Consolas,Menlo,monospace;padding:10px;color:#666}@media(max-width:900px){.detailGrid{grid-template-columns:1fr}.modalBox{inset:2%}}");
   parts.push("</style></head><body>");
   parts.push("<h1>jQuery " + CVE_ID + " 조치 보고서 (" + TOOL_NAME + " v" + TOOL_VERSION + ")</h1>");
   parts.push('<div class="small">Mode: ' + htmlEsc(c.Mode) + " / jQuery target: " + htmlEsc(c.JqueryTargetVersion) + " / pass floor: " + htmlEsc(c.JqueryFloorVersion) + " / Source: " + htmlEsc(c.SourceRoot) + " / WebContent: " + htmlEsc(c.WebContentRoot) + " / Target: " + htmlEsc(c.TargetRoot) + "</div>");
   parts.push('<h2>요약</h2><div class="cards">');
-  parts.push(kpiCard("전체 파일", c.TotalFiles, "#3b6fd4"));
-  parts.push(kpiCard("페이지(JSP 등)", c.PageFiles, "#3b6fd4"));
-  parts.push(kpiCard("JS 파일", c.JsFiles, "#3b6fd4"));
   parts.push(kpiCard("3.5 게이트", c.Gate35Blockers, "#b00020"));
-  parts.push(kpiCard("Critical (구버전 jQuery)", c.Critical, "#b00020"));
-  parts.push(kpiCard("XSS 고위험", c.XssHigh, "#b00020"));
-  parts.push(kpiCard("수동 조치", c.Manual, "#b26a00"));
-  parts.push(kpiCard("검토 필요", c.Review, "#b26a00"));
-  parts.push(kpiCard("자동수정", c.AutoFixed, "#1b5e20"));
-  parts.push(kpiCard("자동수정(추론)", c.AutoFixed2, "#1b5e20"));
+  parts.push(kpiCard("자동수정", c.AutoFixed + c.AutoFixed2, "#1b5e20"));
   parts.push(kpiCard("FocusQueue", c.FocusQueue, "#6a1b9a"));
+  parts.push(kpiCard("수동/검토", c.Manual + c.Review, "#b26a00"));
+  parts.push(kpiCard("XSS 고위험", c.XssHigh, "#b00020"));
   parts.push(kpiCard("벤더 검토", c.VendorReview, "#546e7a"));
-  parts.push(kpiCard("정적 HTML(저위험)", c.StaticHtmlLow, "#78909c"));
   parts.push("</div>");
   parts.push("<h2>조치 범위 로드맵</h2>");
   parts.push(scopeRoadmapHtml(model));
   parts.push("<h2>단계별 FocusQueue (상위 100건)</h2>");
   parts.push('<div class="small">1차 최소부터 확인하세요. 파일명을 클릭하면 AS-IS/TO-BE 주변 코드, 판단 사유, 권장 조치, 확인 포인트가 모달로 열립니다.</div>');
   parts.push(focusQueueHtml(model, focusDetails));
+  parts.push("<details><summary>상세 표 펼치기</summary><div class=\"detailBlock\">");
   parts.push("<h2>1차 상세: " + TARGET_JQUERY_FLOOR_VERSION + " 미만 jQuery core 호출부 (" + model.oldCoreRefs.length + "건)</h2>");
   parts.push(tableHtml(["페이지", "라인", "src", "버전"], model.oldCoreRefs.map(function (r) { return [r.page, r.line, r.raw, r.meta.ver]; })));
   parts.push('<div class="small">이 항목은 plan/autofix에서는 자동 변경되지 않습니다. ' + htmlEsc(model.profile.jquery.coreFile) + " / " + htmlEsc(model.profile.jquery.migrateFile) + ' 파일을 WebContent/js에 넣은 뒤 patch-jquery 모드로 교체하세요.</div>');
@@ -2945,7 +2938,7 @@ function writeIndexHtml(model) {
   }
   parts.push("<h2>다음 액션</h2><ol>");
   recommendedActions(model).forEach(function (a) { parts.push("<li>" + htmlEsc(a) + "</li>"); });
-  parts.push("</ol>");
+  parts.push("</ol></div></details>");
   parts.push('<div class="small">상세 데이터: apiFindings.csv / focusQueue.csv / jspPages.csv / pageScriptEffective.csv / jquery35_report.xls</div>');
   parts.push('<div id="focusDetailModal" class="modalBackdrop" onclick="if(event.target===this) closeFocusDetail();"><div class="modalBox"><div class="modalHead"><div id="focusModalTitle" class="modalTitle"></div><button type="button" class="modalClose" onclick="closeFocusDetail()">Close</button></div><div class="modalBody"><div id="focusModalInfo" class="infoGrid"></div><div class="detailGrid"><div class="pane"><h3>AS-IS</h3><div id="focusAsIs"></div></div><div class="pane"><h3>TO-BE</h3><div id="focusToBe"></div></div></div></div></div></div>');
   parts.push("<script>window.__JQ35_FOCUS_DETAILS__=" + scriptJson(focusDetails) + ";\n(function(){function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c];});}function block(sn){if(!sn||!sn.available){return '<div class=\"noteBox\">'+esc(sn&&sn.note?sn.note:'not available')+'</div>';}return sn.rows.map(function(r){return '<div class=\"codeLine '+(r.hit?'hit':'')+'\"><span class=\"ln\">'+esc(r.n)+'</span><span class=\"txt\">'+esc(r.text)+'</span></div>';}).join('');}window.openFocusDetail=function(i){var d=window.__JQ35_FOCUS_DETAILS__[i];if(!d)return;document.getElementById('focusModalTitle').textContent='#'+d.rank+' '+d.rel+':'+d.line;document.getElementById('focusModalInfo').innerHTML='<div>유형</div><div>'+esc(d.category)+' / '+esc(d.priority)+' / '+esc(d.confidence)+'</div><div>패턴</div><div>'+esc(d.pattern)+'</div><div>왜 문제인가</div><div>'+esc(d.reason)+'</div><div>어떻게 바꾸나</div><div>'+esc(d.change)+'</div><div>확인할 것</div><div>'+esc(d.verify)+'</div>';document.getElementById('focusAsIs').innerHTML=block(d.asIs);document.getElementById('focusToBe').innerHTML=block(d.toBe);document.getElementById('focusDetailModal').style.display='block';};window.closeFocusDetail=function(){document.getElementById('focusDetailModal').style.display='none';};document.addEventListener('keydown',function(e){if(e.key==='Escape')closeFocusDetail();});})();</script>");
