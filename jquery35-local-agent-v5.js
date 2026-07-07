@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.3.0";
+const TOOL_VERSION = "5.3.1";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -1350,6 +1350,15 @@ function handleAttr(model, ctx, p) {
   });
 }
 
+function isLikelyBooleanIdent(name) {
+  if (!name) return false;
+  if (/^(flag|bool|boolean|blean|checked|selected|disabled|readonly|enabled|visible|hidden|active|valid|invalid)$/i.test(name)) return true;
+  if (/^(is|has|can|should|use|allow|enable|disable)[A-Z0-9_]/.test(name)) return true;
+  if (/^(is|has|can|should|use|allow|enable|disable)_/i.test(name)) return true;
+  if (/^b[A-Z_]/.test(name)) return true;
+  return false;
+}
+
 function literalGroupOf(argMasked, argOrig) {
   const t = String(argOrig).trim();
   if (/^(true|false)$/.test(t)) return { group: "bool", value: t };
@@ -1396,6 +1405,10 @@ function resolveAutoFixed2(model) {
       }
       f.pending = null;
     };
+    if (isLikelyBooleanIdent(ident)) {
+      finalize(true, "identifier naming heuristic: '" + ident + "' looks boolean; keep manual review if it can contain Y/N or string values", ident, []);
+      return;
+    }
     if (!encl) { finalize(false, "'" + ident + "' is not a parameter of an enclosing named function", null); return; }
     const defsForName = model.defs[encl.name] || [];
     if (defsForName.length !== 1) { finalize(false, "function '" + encl.name + "' defined " + defsForName.length + " times in project", null); return; }
@@ -2788,29 +2801,58 @@ const FOCUS_STAGE_ORDER = [
   { key: "max", title: "3차 최대/후속", badge: "장기 정리", tone: "calm", desc: "이번 배포 필수 범위 밖의 보안/유지보수 부채입니다. 일정이 있을 때 확장합니다." }
 ];
 function focusStageKey(f) {
-  if (f.priority === "Critical" || f.category === "jquery-core-old" || f.category === "jquery-core-unknown") return "min";
+  if (f.priority === "Critical" || f.category === "jquery-core-old" || f.category === "jquery-core-unknown" || f.category === "jquery-core-patched") return "min";
   if (f.priority === "XssHigh") return "max";
   if (f.category === "dom-sink" || f.category === "dom-factory" || f.category === "parse-html" || f.category === "wrapper-dom-sink" || f.category === "trim-deprecated") return "max";
   return "compat";
 }
-function buildFocusDetails(model) {
+function snippetComparable(sn) {
+  if (!sn || !sn.available) return "";
+  const hitRows = sn.rows.filter(function (r) { return r.hit; });
+  const rows = hitRows.length ? hitRows : sn.rows;
+  return rows.map(function (r) { return r.text; }).join("\n");
+}
+function toBeStatus(asIs, toBe) {
+  if (!toBe || !toBe.available) return "TO-BE 없음";
+  if (!asIs || !asIs.available) return "TO-BE 있음";
+  return snippetComparable(asIs) === snippetComparable(toBe) ? "변경없음" : "변경됨";
+}
+function statusClass(d) {
+  if (d.toBeStatus === "변경됨") return "changed";
+  if (d.toBeStatus === "변경없음") return "same";
+  return "missing";
+}
+function findingDetail(model, f, rank, modalIndex, sourceKind) {
   const hasTarget = model.targetWcRoot && isDir(model.targetWcRoot);
+  const ctx = model.ctxByRel[f.rel];
+  const line = f.line || (ctx ? lineOf(ctx.lineStarts, f.idx || 0) : 1);
+  const asIs = ctx ? { available: true, note: "", rows: snippetRows(ctx.text, line, 5) } : snippetFromRoot(model.webContentRoot, f.rel, line, 5, "source not available");
+  const toBe = snippetFromRoot(hasTarget ? model.targetWcRoot : "", f.rel, line, 5, hasTarget ? "TO-BE file not available" : "TO-BE not generated in this mode");
+  return {
+    rank: rank, modalIndex: modalIndex, sourceKind: sourceKind, stage: focusStageKey(f), rel: f.rel, line: line, category: f.category, priority: f.priority,
+    confidence: f.confidence, action: f.action, pattern: f.pattern,
+    reason: f.reason, change: changePlanText(model, f), verify: verificationHint(model, f),
+    toBeStatus: toBeStatus(asIs, toBe), asIs: asIs, toBe: toBe
+  };
+}
+function buildFocusDetails(model) {
   return model.focus.slice(0, 100).map(function (f, i) {
-    const ctx = model.ctxByRel[f.rel];
-    const line = f.line || (ctx ? lineOf(ctx.lineStarts, f.idx || 0) : 1);
-    return {
-      rank: i + 1, modalIndex: i, stage: focusStageKey(f), rel: f.rel, line: line, category: f.category, priority: f.priority,
-      confidence: f.confidence, action: f.action, pattern: f.pattern,
-      reason: f.reason, change: changePlanText(model, f), verify: verificationHint(model, f),
-      asIs: ctx ? { available: true, note: "", rows: snippetRows(ctx.text, line, 5) } : snippetFromRoot(model.webContentRoot, f.rel, line, 5, "source not available"),
-      toBe: snippetFromRoot(hasTarget ? model.targetWcRoot : "", f.rel, line, 5, hasTarget ? "TO-BE file not available" : "TO-BE not generated in this mode")
-    };
+    return findingDetail(model, f, i + 1, i, "FocusQueue");
   });
 }
-function focusQueueHtml(model, details) {
+function buildAutoFixDetails(model, startIndex) {
+  if (!(model.targetWcRoot && isDir(model.targetWcRoot))) return [];
+  return model.findings.filter(function (f) {
+    return f.action === "Changed" && (f.priority === "AutoFixed" || f.priority === "AutoFixed2");
+  }).slice(0, 100).map(function (f, i) {
+    return findingDetail(model, f, "A" + (i + 1), startIndex + i, "AutoFixed");
+  });
+}
+function focusQueueHtml(model, details, autoDetails) {
   let h = "";
   buildScopeRows(model).forEach(function (stage) {
     const group = details.filter(function (d) { return d.stage === stage.key; });
+    const autoGroup = autoDetails.filter(function (d) { return d.stage === stage.key; });
     h += '<section class="stageFocus ' + stage.tone + '">';
     h += '<div class="stageHead"><div><b>' + htmlEsc(stage.title) + '</b><span>' + htmlEsc(stage.badge) + '</span></div>';
     h += '<div class="stageCounts"><div><b>' + htmlEsc(stage.count) + '</b><span>범위</span></div><div><b>' + htmlEsc(group.length) + '</b><span>큐</span></div></div></div>';
@@ -2819,13 +2861,22 @@ function focusQueueHtml(model, details) {
     h += '<div class="stageLine"><b>할 일</b><br>' + htmlEsc(stage.doText) + '</div>';
     h += '<div class="stageLine"><b>멈춤 기준</b><br>' + htmlEsc(stage.stop) + '</div>';
     h += '<div class="stageFiles"><b>상세</b> ' + stage.files.join(" / ") + '</div></div><div class="stageQueue">';
+    if (autoGroup.length > 0) {
+      h += '<div class="subHead"><b>자동수정 미리보기</b><span>TO-BE에서 실제 바뀐 항목</span></div>';
+      h += '<div class="queueTable"><table><thead><tr><th>순번</th><th>파일</th><th>라인</th><th>유형</th><th>TO-BE</th></tr></thead><tbody>';
+      autoGroup.forEach(function (d) {
+        h += "<tr><td>" + htmlEsc(d.rank) + '</td><td><button type="button" class="filelink" onclick="openFocusDetail(' + d.modalIndex + ')">' + htmlEsc(d.rel) + "</button></td><td>" + htmlEsc(d.line) + "</td><td>" + htmlEsc(d.category) + '</td><td><span class="status ' + statusClass(d) + '">' + htmlEsc(d.toBeStatus) + "</span></td></tr>";
+      });
+      h += "</tbody></table></div>";
+    }
+    h += '<div class="subHead"><b>검토 큐</b><span>자동수정 대상이 아닌 수동 확인 항목</span></div>';
     if (group.length === 0) {
       h += '<div class="emptyQueue">이 단계에 표시할 FocusQueue 항목이 없습니다.</div></div></div></section>';
       return;
     }
-    h += '<div class="queueTable"><table><thead><tr><th>순위</th><th>파일</th><th>라인</th><th>유형</th><th>우선순위</th><th>사유</th></tr></thead><tbody>';
+    h += '<div class="queueTable"><table><thead><tr><th>순위</th><th>파일</th><th>라인</th><th>유형</th><th>우선순위</th><th>TO-BE</th><th>사유</th></tr></thead><tbody>';
     group.forEach(function (d) {
-      h += "<tr><td>" + d.rank + '</td><td><button type="button" class="filelink" onclick="openFocusDetail(' + d.modalIndex + ')">' + htmlEsc(d.rel) + "</button></td><td>" + htmlEsc(d.line) + "</td><td>" + htmlEsc(d.category) + "</td><td>" + htmlEsc(d.priority) + "</td><td>" + htmlEsc(d.reason) + "</td></tr>";
+      h += "<tr><td>" + d.rank + '</td><td><button type="button" class="filelink" onclick="openFocusDetail(' + d.modalIndex + ')">' + htmlEsc(d.rel) + "</button></td><td>" + htmlEsc(d.line) + "</td><td>" + htmlEsc(d.category) + "</td><td>" + htmlEsc(d.priority) + '</td><td><span class="status ' + statusClass(d) + '">' + htmlEsc(d.toBeStatus) + "</span></td><td>" + htmlEsc(d.reason) + "</td></tr>";
     });
     h += "</tbody></table></div></div></div></section>";
   });
@@ -2885,11 +2936,13 @@ function buildScopeRows(model) {
 function writeIndexHtml(model) {
   const c = model.counters;
   const focusDetails = buildFocusDetails(model);
+  const autoDetails = buildAutoFixDetails(model, focusDetails.length);
+  const modalDetails = focusDetails.concat(autoDetails);
   const parts = [];
   parts.push("<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\"><title>jQuery 3.5 조치 보고서</title><style>");
   parts.push("*{box-sizing:border-box}body{font-family:'Malgun Gothic',AppleGothic,sans-serif;margin:0;background:#eef2f6;color:#202733}.shell{max-width:1440px;margin:0 auto;padding:24px}h1{font-size:22px;line-height:1.25;margin:0;color:#151b24}h2{font-size:15px;margin:24px 0 10px;color:#1f2937}.topbar{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:18px 20px;display:flex;justify-content:space-between;gap:20px;box-shadow:0 8px 22px rgba(31,41,55,.06)}.eyebrow{font-size:11px;font-weight:700;letter-spacing:.04em;color:#5b6677;text-transform:uppercase}.subtitle{margin-top:8px;font-size:12px;color:#5b6677;word-break:break-all}.metaPills{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;min-width:260px}.pill{border:1px solid #d7ddea;border-radius:999px;background:#f7f9fc;color:#344054;font-size:12px;padding:5px 9px;white-space:nowrap}");
   parts.push(".cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}.card{background:#fff;border:1px solid #d8dee8;border-left:4px solid var(--accent);border-radius:8px;padding:11px 14px;min-width:0;box-shadow:0 4px 14px rgba(31,41,55,.04)}.card .v{font-size:24px;line-height:1.1;font-weight:800;color:#101828}.card .l{font-size:12px;color:#667085;margin-top:4px}a{color:#1a5fb4;text-decoration:none}a:hover{text-decoration:underline}.small{font-size:12px;color:#5b6677}.tableWrap,.queueTable{overflow:auto;border:1px solid #dfe5ef;border-radius:8px;background:#fff;margin-top:8px}table{border-collapse:collapse;background:#fff;font-size:12px;width:100%}th,td{border-bottom:1px solid #e6ebf2;padding:7px 9px;text-align:left;word-break:break-all;vertical-align:top}th{background:#f5f7fb;color:#344054;font-weight:700}tr:last-child td{border-bottom:0}.warn{color:#b26a00}.crit{color:#b00020;font-weight:bold}.ok{color:#1b5e20}");
-  parts.push(".stageFocus{background:#fff;border:1px solid #d8dee8;border-left:4px solid #78909c;border-radius:8px;margin-top:12px;padding:14px;box-shadow:0 6px 18px rgba(31,41,55,.05)}.stageFocus.danger{border-left-color:#b42318}.stageFocus.warn{border-left-color:#b54708}.stageFocus.calm{border-left-color:#4e5f70}.stageHead{display:flex;align-items:center;justify-content:space-between;gap:12px}.stageHead b{font-size:16px;color:#1f2937}.stageHead span{margin-left:8px;font-size:11px;color:#5b6677;border:1px solid #d7ddea;border-radius:999px;padding:2px 8px;background:#f7f9fc}.stageCounts{display:flex;gap:8px;flex-shrink:0}.stageCounts div{min-width:58px;border:1px solid #dfe5ef;border-radius:8px;background:#f8fafc;padding:6px 8px;text-align:right}.stageCounts b{display:block;font-size:20px;line-height:1;color:#101828}.stageCounts span{display:block;margin:3px 0 0;border:0;background:transparent;padding:0;color:#667085}.stageBody{display:grid;grid-template-columns:minmax(260px,.42fr) minmax(0,1fr);gap:14px;margin-top:12px}.stagePlan{background:#f8fafc;border:1px solid #e3e8f0;border-radius:8px;padding:11px}.stageLine{font-size:12px;color:#5b6677;margin-top:9px}.stageLine:first-child{margin-top:0}.stageLine b,.stageFiles b{color:#344054}.stageFiles{font-size:12px;margin-top:10px;color:#5b6677}.stageQueue{min-width:0}.queueHint{margin-top:4px}.emptyQueue{border:1px dashed #cfd7e3;border-radius:8px;background:#f8fafc;color:#667085;font-size:12px;padding:12px}");
+  parts.push(".stageFocus{background:#fff;border:1px solid #d8dee8;border-left:4px solid #78909c;border-radius:8px;margin-top:12px;padding:14px;box-shadow:0 6px 18px rgba(31,41,55,.05)}.stageFocus.danger{border-left-color:#b42318}.stageFocus.warn{border-left-color:#b54708}.stageFocus.calm{border-left-color:#4e5f70}.stageHead{display:flex;align-items:center;justify-content:space-between;gap:12px}.stageHead b{font-size:16px;color:#1f2937}.stageHead span{margin-left:8px;font-size:11px;color:#5b6677;border:1px solid #d7ddea;border-radius:999px;padding:2px 8px;background:#f7f9fc}.stageCounts{display:flex;gap:8px;flex-shrink:0}.stageCounts div{min-width:58px;border:1px solid #dfe5ef;border-radius:8px;background:#f8fafc;padding:6px 8px;text-align:right}.stageCounts b{display:block;font-size:20px;line-height:1;color:#101828}.stageCounts span{display:block;margin:3px 0 0;border:0;background:transparent;padding:0;color:#667085}.stageBody{display:grid;grid-template-columns:minmax(260px,.42fr) minmax(0,1fr);gap:14px;margin-top:12px}.stagePlan{background:#f8fafc;border:1px solid #e3e8f0;border-radius:8px;padding:11px}.stageLine{font-size:12px;color:#5b6677;margin-top:9px}.stageLine:first-child{margin-top:0}.stageLine b,.stageFiles b{color:#344054}.stageFiles{font-size:12px;margin-top:10px;color:#5b6677}.stageQueue{min-width:0}.queueHint{margin-top:4px}.subHead{display:flex;justify-content:space-between;gap:10px;align-items:center;margin:10px 0 5px}.subHead b{font-size:13px;color:#344054}.subHead span{font-size:11px;color:#667085}.status{display:inline-block;border-radius:999px;border:1px solid #d7ddea;padding:2px 7px;font-size:11px;white-space:nowrap}.status.changed{border-color:#7a2e0e;background:#fff4ed;color:#b42318}.status.same{background:#f8fafc;color:#667085}.status.missing{background:#fef7c3;color:#93370d}.emptyQueue{border:1px dashed #cfd7e3;border-radius:8px;background:#f8fafc;color:#667085;font-size:12px;padding:12px}");
   parts.push("details{background:#fff;border:1px solid #d8dee8;border-radius:8px;margin-top:14px;padding:10px 12px}summary{cursor:pointer;font-weight:800;color:#1f2937}.detailBlock{margin-top:10px}.filelink{border:0;background:transparent;color:#1a5fb4;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;padding:0}.modalBackdrop{position:fixed;inset:0;background:rgba(15,23,42,.58);z-index:1000;display:none}.modalBox{position:absolute;inset:4%;background:#fff;border:1px solid #344054;border-radius:8px;box-shadow:0 20px 60px rgba(15,23,42,.35);display:flex;flex-direction:column}.modalHead{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #d8dee8;background:#f5f7fb}.modalTitle{font-weight:800}.modalClose{border:1px solid #98a2b3;border-radius:6px;background:#fff;padding:5px 11px;cursor:pointer}.modalBody{padding:12px;overflow:auto}.detailGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.infoGrid{display:grid;grid-template-columns:130px 1fr;gap:5px 10px;font-size:12px;margin-bottom:12px}.infoGrid div:nth-child(odd){font-weight:800;color:#475467}.pane{border:1px solid #d8dee8;border-radius:8px;background:#fbfcfe;overflow:hidden}.pane h3{font-size:13px;margin:0;padding:7px 9px;background:#f3f6fa;border-bottom:1px solid #d8dee8}.codeLine{display:grid;grid-template-columns:46px 1fr;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap}.codeLine .ln{color:#667085;text-align:right;padding:0 8px;border-right:1px solid #e4e9f1;user-select:none}.codeLine .txt{padding:0 8px}.codeLine.hit{background:#fff4cf}.noteBox{font:12px Consolas,Menlo,monospace;padding:10px;color:#667085}@media(max-width:1100px){.cards{grid-template-columns:repeat(3,minmax(0,1fr))}.stageBody{grid-template-columns:1fr}.topbar{display:block}.metaPills{justify-content:flex-start;margin-top:12px}}@media(max-width:700px){.shell{padding:14px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.stageHead{align-items:flex-start}.stageCounts{display:grid;grid-template-columns:1fr 1fr}.detailGrid{grid-template-columns:1fr}.modalBox{inset:2%}}");
   parts.push("</style></head><body><main class=\"shell\">");
   parts.push('<section class="topbar"><div><div class="eyebrow">' + htmlEsc(TOOL_NAME + " v" + TOOL_VERSION) + '</div><h1>jQuery ' + htmlEsc(CVE_ID) + ' 조치 보고서</h1><div class="subtitle">Source: ' + htmlEsc(c.SourceRoot) + " / WebContent: " + htmlEsc(c.WebContentRoot) + " / Target: " + htmlEsc(c.TargetRoot) + '</div></div><div class="metaPills"><span class="pill">Mode ' + htmlEsc(c.Mode) + '</span><span class="pill">Target ' + htmlEsc(c.JqueryTargetVersion) + '</span><span class="pill">Pass ' + htmlEsc(c.JqueryFloorVersion) + '+</span></div></section>');
@@ -2903,7 +2956,7 @@ function writeIndexHtml(model) {
   parts.push("</div>");
   parts.push("<h2>단계별 조치 큐 (로드맵 + FocusQueue 상위 100건)</h2>");
   parts.push('<div class="small queueHint">1차 최소부터 확인하세요. 각 단계 안에서 목표와 멈춤 기준을 보고, 파일명을 클릭하면 AS-IS/TO-BE 주변 코드와 확인 포인트가 모달로 열립니다.</div>');
-  parts.push(focusQueueHtml(model, focusDetails));
+  parts.push(focusQueueHtml(model, focusDetails, autoDetails));
   parts.push("<details><summary>상세 표 펼치기</summary><div class=\"detailBlock\">");
   parts.push("<h2>1차 상세: " + TARGET_JQUERY_FLOOR_VERSION + " 미만 jQuery core 호출부 (" + model.oldCoreRefs.length + "건)</h2>");
   parts.push(tableHtml(["페이지", "라인", "src", "버전"], model.oldCoreRefs.map(function (r) { return [r.page, r.line, r.raw, r.meta.ver]; })));
@@ -2930,7 +2983,7 @@ function writeIndexHtml(model) {
   parts.push('<div class="small">상세 데이터: apiFindings.csv / focusQueue.csv / jspPages.csv / pageScriptEffective.csv / jquery35_report.xls</div>');
   parts.push("</main>");
   parts.push('<div id="focusDetailModal" class="modalBackdrop" onclick="if(event.target===this) closeFocusDetail();"><div class="modalBox"><div class="modalHead"><div id="focusModalTitle" class="modalTitle"></div><button type="button" class="modalClose" onclick="closeFocusDetail()">Close</button></div><div class="modalBody"><div id="focusModalInfo" class="infoGrid"></div><div class="detailGrid"><div class="pane"><h3>AS-IS</h3><div id="focusAsIs"></div></div><div class="pane"><h3>TO-BE</h3><div id="focusToBe"></div></div></div></div></div></div>');
-  parts.push("<script>window.__JQ35_FOCUS_DETAILS__=" + scriptJson(focusDetails) + ";\n(function(){function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c];});}function block(sn){if(!sn||!sn.available){return '<div class=\"noteBox\">'+esc(sn&&sn.note?sn.note:'not available')+'</div>';}return sn.rows.map(function(r){return '<div class=\"codeLine '+(r.hit?'hit':'')+'\"><span class=\"ln\">'+esc(r.n)+'</span><span class=\"txt\">'+esc(r.text)+'</span></div>';}).join('');}window.openFocusDetail=function(i){var d=window.__JQ35_FOCUS_DETAILS__[i];if(!d)return;document.getElementById('focusModalTitle').textContent='#'+d.rank+' '+d.rel+':'+d.line;document.getElementById('focusModalInfo').innerHTML='<div>유형</div><div>'+esc(d.category)+' / '+esc(d.priority)+' / '+esc(d.confidence)+'</div><div>패턴</div><div>'+esc(d.pattern)+'</div><div>왜 문제인가</div><div>'+esc(d.reason)+'</div><div>어떻게 바꾸나</div><div>'+esc(d.change)+'</div><div>확인할 것</div><div>'+esc(d.verify)+'</div>';document.getElementById('focusAsIs').innerHTML=block(d.asIs);document.getElementById('focusToBe').innerHTML=block(d.toBe);document.getElementById('focusDetailModal').style.display='block';};window.closeFocusDetail=function(){document.getElementById('focusDetailModal').style.display='none';};document.addEventListener('keydown',function(e){if(e.key==='Escape')closeFocusDetail();});})();</script>");
+  parts.push("<script>window.__JQ35_FOCUS_DETAILS__=" + scriptJson(modalDetails) + ";\n(function(){function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c];});}function block(sn){if(!sn||!sn.available){return '<div class=\"noteBox\">'+esc(sn&&sn.note?sn.note:'not available')+'</div>';}return sn.rows.map(function(r){return '<div class=\"codeLine '+(r.hit?'hit':'')+'\"><span class=\"ln\">'+esc(r.n)+'</span><span class=\"txt\">'+esc(r.text)+'</span></div>';}).join('');}window.openFocusDetail=function(i){var d=window.__JQ35_FOCUS_DETAILS__[i];if(!d)return;document.getElementById('focusModalTitle').textContent='#'+d.rank+' '+d.rel+':'+d.line;document.getElementById('focusModalInfo').innerHTML='<div>목록</div><div>'+esc(d.sourceKind)+'</div><div>TO-BE 상태</div><div>'+esc(d.toBeStatus)+'</div><div>유형</div><div>'+esc(d.category)+' / '+esc(d.priority)+' / '+esc(d.confidence)+'</div><div>패턴</div><div>'+esc(d.pattern)+'</div><div>왜 문제인가</div><div>'+esc(d.reason)+'</div><div>어떻게 바꾸나</div><div>'+esc(d.change)+'</div><div>확인할 것</div><div>'+esc(d.verify)+'</div>';document.getElementById('focusAsIs').innerHTML=block(d.asIs);document.getElementById('focusToBe').innerHTML=block(d.toBe);document.getElementById('focusDetailModal').style.display='block';};window.closeFocusDetail=function(){document.getElementById('focusDetailModal').style.display='none';};document.addEventListener('keydown',function(e){if(e.key==='Escape')closeFocusDetail();});})();</script>");
   parts.push("</body></html>");
   writeUtf8(path.join(model.reportRoot, "index.html"), parts.join("\n"), false);
 }
@@ -3603,6 +3656,8 @@ const ST_UTIL_JS = [
   'setBtn("N");',
   "toggleAll(true);",
   "toggleAll(false);",
+  "var blean = true;",
+  '$("#lineDel").attr("disabled", blean);',
   'var $list = $("#list");',
   '$list.delegate(".row", "click", onRow);',
   "function onRow() {",
@@ -3666,7 +3721,7 @@ function selfTest(opts) {
     const c1 = m1.counters;
     check("critical detected (2 old jquery refs)", c1.Critical === 2, "got " + c1.Critical);
     check("autoFixed >= 6", c1.AutoFixed >= 6, "got " + c1.AutoFixed);
-    check("autoFixed2 == 2 (sts Y/N + flag bool)", c1.AutoFixed2 === 2, "got " + c1.AutoFixed2);
+    check("autoFixed2 == 3 (sts Y/N + flag bool + blean heuristic)", c1.AutoFixed2 === 3, "got " + c1.AutoFixed2);
     check("xssHigh >= 1 (.html(response))", c1.XssHigh >= 1, "got " + c1.XssHigh);
     check("staticHtmlLow >= 1 (append option literal)", c1.StaticHtmlLow >= 1, "got " + c1.StaticHtmlLow);
     check("vendorReview >= 1 (jqgrid fixture)", c1.VendorReview >= 1, "got " + c1.VendorReview);
@@ -3692,6 +3747,7 @@ function selfTest(opts) {
     const utilTobe = readLatin1(path.join(t1, "WebContent", "js", "util.js"));
     check("AutoFixed2 sts === Y", utilTobe.indexOf('.prop("disabled", sts === "Y")') >= 0, trunc(utilTobe, 200));
     check("AutoFixed2 flag boolean", utilTobe.indexOf('.prop("disabled", flag)') >= 0, "");
+    check("AutoFixed2 blean heuristic", utilTobe.indexOf('$("#lineDel").prop("disabled", blean)') >= 0, "");
     check("delegate -> on", utilTobe.indexOf('.on("click", ".row", onRow)') >= 0, "");
     check("unbind -> off", utilTobe.indexOf('$list.off("mouseover")') >= 0, "");
     check("Function.bind preserved", utilTobe.indexOf("onRow.bind(this)") >= 0, "");
