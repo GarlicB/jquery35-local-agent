@@ -7,8 +7,9 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.2.0";
-const DEFAULT_JQUERY_VERSION = "3.7.1";
+const TOOL_VERSION = "5.3.0";
+const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
+const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
 const CVE_ID = "CVE-2020-11023";
 const PROBE_FILE_NAME = "jquery35-test-probe.js";
@@ -403,7 +404,8 @@ function defaultProfile() {
       coreFile: "jquery-" + DEFAULT_JQUERY_VERSION + ".min.js",
       migrateFile: "jquery-migrate-" + DEFAULT_MIGRATE_VERSION + ".min.js",
       newJquerySrc: "",
-      newMigrateSrc: ""
+      newMigrateSrc: "",
+      migrateTrace: false
     },
     probe: {
       enabled: true,
@@ -447,11 +449,12 @@ function loadProfile(opts, sourceRoot) {
     prof.jquery.migrateVersion = opts["migrate-version"];
     prof.jquery.migrateFile = "jquery-migrate-" + opts["migrate-version"] + ".min.js";
   }
+  if (opts["migrate-trace"]) prof.jquery.migrateTrace = true;
   prof.appScriptHints = prof.appScriptHints.map(function (s) { return toPosix(s).toLowerCase(); });
   return prof;
 }
 
-const BOOL_FLAGS = { "audit-only": 1, "inject-probe": 1, "patch-jquery": 1, "no-lab": 1, "self-test": 1, "include-snippets": 1, "warn-as-error": 1, "help": 1 };
+const BOOL_FLAGS = { "audit-only": 1, "inject-probe": 1, "patch-jquery": 1, "migrate-trace": 1, "no-lab": 1, "self-test": 1, "include-snippets": 1, "warn-as-error": 1, "help": 1 };
 
 function parseArgs(argv) {
   const opts = { _: [] };
@@ -513,12 +516,14 @@ function helpText() {
     "  --migrate-version <v>     default " + DEFAULT_MIGRATE_VERSION,
     "  --inject-probe            also inject probe in autofix/patch-jquery mode",
     "  --patch-jquery            also swap jQuery core in autofix mode",
+    "  --migrate-trace           patch-jquery: insert jQuery.migrateTrace=true",
+    "                            and migrateMute=false directly after Migrate",
     "  --audit-only              alias of --mode plan",
     "  --safe-packet [true|false]  exclude code snippets from assistant_packet (default true)",
     "  --include-snippets        include short snippets in packet (overrides safe-packet)",
     "  --max-packet-lines <n>    packet line cap (default 400)",
     "  --max-review-cases <n>    review-pack: max distinct cases per round (default 20)",
-    "  --context-lines <n>       review-pack: excerpt lines shown before/after (default 3)",
+    "  --context-lines <n>       review-pack: excerpt lines shown before/after (default 1)",
     "  --max-review-lines <n>    review-pack: ai_review_pack.txt line cap (default 300)",
     "  --no-lab                  skip mock_routes.json / mock_data_default.json generation",
     "  --warn-as-error           verify-clean returns exit 1 on WARN",
@@ -671,7 +676,7 @@ function scriptRefMeta(rawRef, resolved, model) {
     const abs = model.fileIndex[resolved.resolved.toLowerCase()];
     if (abs) ver = sniffJqueryVersion(abs);
   }
-  const isOld = isCore && ver && versionLt(ver, "3.5.0");
+  const isOld = isCore && ver && versionLt(ver, TARGET_JQUERY_FLOOR_VERSION);
   return { name: name, lib: isCore ? "jquery-core" : lib, ver: ver, isCore: isCore, isMigrate: isMig, isOld: !!isOld };
 }
 
@@ -1168,11 +1173,11 @@ function scanRegionFindings(model, ctx, region) {
     if (util === "trim") {
       addFinding(model, ctx, {
         idx: fIdx, category: "trim-deprecated", pattern: "$.trim(",
-        priority: "Review", confidence: "Medium", action: "ReviewOnly",
+        priority: "StaticHtmlLow", confidence: "High", action: "Ignored",
         before: trunc(O(m.index, closeIdx + 1), 120),
-        reason: "$.trim deprecated (removed in jQuery 4); still works in 3.x",
-        suggestion: "String(" + trunc(argOrig, 40) + ").trim()",
-        commitGroup: "AUTO_SAFE"
+        reason: "$.trim is still supported on jQuery 3.x; defer until a future jQuery 4 cleanup because native trim has different null/undefined behavior",
+        suggestion: "Leave unchanged for the 3.5.1 landing; later replace only after confirming null/undefined inputs",
+        commitGroup: "DEFERRED_4X"
       });
     } else if (util === "parseHTML") {
       checkSelfClosedArgs(model, ctx, abs, [{ orig: argOrig, rawOrig: O(parenIdx + 1, closeIdx), masked: argMasked, s: parenIdx + 1, e: closeIdx }], "$.parseHTML(");
@@ -1668,7 +1673,7 @@ function analyzePages(model) {
           idx: s.idx, category: "jquery-core-old", pattern: "script src jquery " + meta.ver,
           priority: "Critical", confidence: "High", action: "CriticalOnly",
           before: trunc(lineTextAt(ctx.text, ctx.lineStarts, line).trim(), 200),
-          reason: "jQuery core " + meta.ver + " < 3.5.0 (" + CVE_ID + "); replaced only in patch-jquery mode",
+          reason: "jQuery core " + meta.ver + " < " + TARGET_JQUERY_FLOOR_VERSION + " (" + CVE_ID + "); replaced only in patch-jquery mode",
           suggestion: "replace with " + model.profile.jquery.coreFile + " + " + model.profile.jquery.migrateFile,
           commitGroup: "JQUERY_CORE"
         });
@@ -1677,7 +1682,7 @@ function analyzePages(model) {
           idx: s.idx, category: "jquery-core-unknown", pattern: "script src " + trunc(s.raw, 60),
           priority: "Review", confidence: "Low", action: "ReviewOnly",
           before: trunc(lineTextAt(ctx.text, ctx.lineStarts, line).trim(), 200),
-          reason: "jQuery core reference with unknown version; verify it is 3.5.0 or higher",
+          reason: "jQuery core reference with unknown version; verify it is " + TARGET_JQUERY_FLOOR_VERSION + " or higher",
           commitGroup: "JQUERY_CORE"
         });
       }
@@ -1749,7 +1754,7 @@ function analyzePages(model) {
     });
     const effCss = eff.length;
     const migrateAfter = hasMigrate && firstCore >= 0 ? (firstMigrate > firstCore ? "Y" : "N") : "";
-    const coreIs35Plus = coreCount > 0 && coreVer && !versionLt(coreVer, "3.5.0");
+    const coreIs35Plus = coreCount > 0 && coreVer && !versionLt(coreVer, TARGET_JQUERY_FLOOR_VERSION);
     model.pages.push({
       rel: ctx.rel, ctx: ctx,
       directScripts: direct, effectiveScripts: eff.length,
@@ -1888,7 +1893,7 @@ function buildInventories(model) {
       if (lib === "jquery-core" && !ver) ver = sniffJqueryVersion(f.abs);
       const min = ctx ? ctx.isMin : /\.min\.js$/i.test(f.rel);
       let risk = "";
-      if (lib === "jquery-core" && ver && versionLt(ver, "3.5.0")) risk = "OLD_JQUERY_CORE_" + CVE_ID;
+      if (lib === "jquery-core" && ver && versionLt(ver, TARGET_JQUERY_FLOOR_VERSION)) risk = "OLD_JQUERY_CORE_" + CVE_ID;
       else if (lib !== "app") risk = "VENDOR";
       else if (min) risk = "MINIFIED";
       model.scriptInv.push([f.rel, lib, ver, lib !== "app" ? "Y" : "N", min ? "Y" : "N", risk]);
@@ -1999,6 +2004,59 @@ const REVIEW_QUESTIONS = Object.assign(Object.create(null), {
 });
 function questionFor(category) {
   return REVIEW_QUESTIONS[category] || "이 코드의 역할은 무엇인가요? (자유 설명)";
+}
+
+const REVIEW_QUESTIONS_SHORT = Object.assign(Object.create(null), {
+  "jqxhr-shorthand": "ajax cb? arg0 server data? A:success B:error C:event D:?",
+  "dom-sink": "sink arg origin? A:server B:user C:safe D:? html possible?",
+  "wrapper-dom-sink": "wrapper uses html/append? arg server data? Y/N/?",
+  "dom-factory": "html string fixed or built? A:fixed B:built C:?",
+  "parse-html": "parseHTML input includes server data? Y/N/?",
+  "bool-attr-variable": "possible values? Y/N true/false 1/0 other?",
+  "trim-deprecated": "$.trim arg always string? A:string B:nullable C:?",
+  "jquery-core-unknown": "jquery version? value or ?",
+  "live-die": "selector targets dynamic elements? Y/N/?",
+  "js-syntax": "legacy IE syntax or real parse issue?"
+});
+function shortQuestionFor(category) {
+  return REVIEW_QUESTIONS_SHORT[category] || "role/intent?";
+}
+
+function shortReviewPath(rel) {
+  let s = toPosix(rel || "");
+  s = s.replace(/^WebContent\//i, "");
+  s = s.replace(/^WEB-INF\/views\//i, "v/");
+  s = s.replace(/^WEB-INF\/layouts\//i, "l/");
+  s = s.replace(/^resources\//i, "r/");
+  const parts = s.split("/").filter(Boolean);
+  if (parts.length > 4) s = ".../" + parts.slice(-4).join("/");
+  return s;
+}
+
+function compactLocations(locs, max) {
+  const out = [];
+  const seen = Object.create(null);
+  locs.forEach(function (loc) {
+    const m = /^(.+):(\d+)$/.exec(loc);
+    const shortLoc = m ? (shortReviewPath(m[1]) + ":" + m[2]) : shortReviewPath(loc);
+    if (!seen[shortLoc]) { seen[shortLoc] = 1; out.push(shortLoc); }
+  });
+  if (out.length <= max) return out.join(" ");
+  return out.slice(0, max).join(" ") + " +" + (out.length - max);
+}
+
+function compactExcerptText(excerpt) {
+  const out = [];
+  const seen = Object.create(null);
+  String(excerpt || "").split(/\n/).forEach(function (line) {
+    let s = line.replace(/\r$/, "").replace(/^\s{0,3}(\d+:)/, "$1").replace(/^>>\s*/, ">");
+    s = s.replace(/[ \t]+/g, " ").trimEnd();
+    const key = s.replace(/^>\s*/, "").replace(/^\d+:\s*/, "");
+    if (key && seen[key]) return;
+    if (key) seen[key] = 1;
+    out.push(s);
+  });
+  return out.join("\n");
 }
 
 function bucketOf(len) {
@@ -2157,7 +2215,7 @@ function buildReviewCases(model) {
   });
   preTop.sort(function (a, b) { return b.score - a.score; });
   const top = preTop.slice(0, maxCases);
-  const contextLines = positiveIntOpt(model.opts["context-lines"], 3);
+  const contextLines = positiveIntOpt(model.opts["context-lines"], 1);
   top.forEach(function (g) {
     const rep = g.findings[0];
     const ctx = model.ctxByRel[rep.rel];
@@ -2166,7 +2224,10 @@ function buildReviewCases(model) {
     g.excerpt = ctx ? excerptFor(model, ctx, rep.idx || 0, contextLines) : "(no excerpt available)";
     g.topCategories = Object.keys(g.categories).sort(function (a, b) { return g.categories[b] - g.categories[a]; }).slice(0, 2);
     g.question = questionFor(g.topCategories[0]);
-    g.sampleLocations = uniq(g.findings.map(function (f) { return f.rel + ":" + f.line; })).slice(0, 5);
+    g.shortQuestion = shortQuestionFor(g.topCategories[0]);
+    g.sampleLocations = uniq(g.findings.map(function (f) { return f.rel + ":" + f.line; })).slice(0, 3);
+    g.sampleLocationsShort = compactLocations(uniq(g.findings.map(function (f) { return f.rel + ":" + f.line; })), 3);
+    g.compactExcerpt = compactExcerptText(g.excerpt);
     g.count = g.findings.length;
   });
   model.reviewCases = top;
@@ -2188,6 +2249,9 @@ function summarize(model) {
     TargetRoot: model.targetRoot || "(not set)",
     ReportRoot: model.reportRoot || "(not set)",
     Mode: model.mode,
+    JqueryTargetVersion: model.profile.jquery.targetVersion,
+    JqueryFloorVersion: TARGET_JQUERY_FLOOR_VERSION,
+    Gate35Blockers: c.Critical,
     TotalFiles: model.allFiles.length,
     TextFiles: model.textFiles.length,
     PageFiles: model.textFiles.filter(function (x) { return x.isPage; }).length,
@@ -2209,6 +2273,7 @@ function summarize(model) {
     PageRiskMultipleJqueryCore: model.pages.filter(function (p) { return p.riskMultiCore; }).length,
     PageRiskOldJqueryCore: model.pages.filter(function (p) { return p.riskOldCore; }).length,
     PageRiskMigrateMissing: model.pages.filter(function (p) { return p.riskMigrateMissing; }).length,
+    PageRiskMigrateBeforeCore: model.pages.filter(function (p) { return p.riskMigrateBeforeCore; }).length,
     UnresolvedRefs: model.unresolvedRows.length,
     AjaxEndpoints: model.ajaxRows.length,
     JsSyntaxFail: model.syntaxRows.filter(function (r) { return r.result === "FAIL"; }).length,
@@ -2311,6 +2376,31 @@ function findScriptTagStartForSrc(text, src) {
   return -1;
 }
 
+function migrateTraceSnippet(indent, eol) {
+  return indent + "<script>" + eol +
+    indent + "jQuery.migrateTrace = true; jQuery.migrateMute = false;" + eol +
+    indent + "</script>";
+}
+
+function ensureMigrateTraceAfterMigrate(text, ctx) {
+  if (!ctx.model.profile.jquery.migrateTrace) return { text: text, changed: false, reason: "disabled" };
+  if (/jQuery\s*\.\s*migrateTrace\b/.test(text) || /jQuery\s*\.\s*migrateMute\b/.test(text)) {
+    return { text: text, changed: false, reason: "already present" };
+  }
+  const re = /<script\b[^>]*\bsrc\s*=\s*(["'])[^"']*jquery[-.]migrate[^"']*\1[^>]*>\s*<\/script>/ig;
+  const m = re.exec(text);
+  if (!m) return { text: text, changed: false, reason: "migrate script tag not found" };
+  const lineStart = text.lastIndexOf("\n", m.index) + 1;
+  const indent = (text.slice(lineStart, m.index).match(/^[ \t]*/) || [""])[0];
+  const eol = ctx.eol || "\n";
+  const insertAt = m.index + m[0].length;
+  return {
+    text: text.slice(0, insertAt) + eol + migrateTraceSnippet(indent, eol) + text.slice(insertAt),
+    changed: true,
+    reason: "inserted after Migrate"
+  };
+}
+
 function patchJqueryCore(model) {
   const jq = model.profile.jquery;
   if (model.oldCoreRefs.length === 0) {
@@ -2382,6 +2472,13 @@ function patchJqueryCore(model) {
           lines.splice(lineIdx + 1, 0, indent + '<script type="text/javascript" src="' + migSrc2 + '"></script>' + eol);
         }
         text = lines.join("\n");
+      }
+      const trace = ensureMigrateTraceAfterMigrate(text, ctx);
+      if (trace.changed) {
+        text = trace.text;
+        model.patchResults.push([rel, "jQuery.migrateTrace", "TRACING", trace.reason]);
+      } else if (jq.migrateTrace && trace.reason !== "already present") {
+        model.patchResults.push([rel, "jQuery.migrateTrace", "SKIP", trace.reason]);
       }
       writeLatin1(tPath, text);
       model.changed[rel] = { projRel: ctx.projRel, edits: (model.changed[rel] ? model.changed[rel].edits : 0) + 1, kind: "patch-jquery" };
@@ -2643,21 +2740,82 @@ function tableHtml(header, rows) {
   });
   return h + "</tbody></table>";
 }
+function scriptJson(v) {
+  return JSON.stringify(v).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+}
+function snippetRows(text, line, contextLines) {
+  const lines = String(text || "").split("\n");
+  let center = parseInt(line, 10);
+  if (!Number.isFinite(center) || center < 1) center = 1;
+  const lo = Math.max(1, center - contextLines);
+  const hi = Math.min(lines.length, center + contextLines);
+  const out = [];
+  for (let ln = lo; ln <= hi; ln++) {
+    out.push({ n: ln, hit: ln === center, text: trunc(String(lines[ln - 1] || "").replace(/\r$/, ""), 500) });
+  }
+  return out;
+}
+function snippetFromRoot(root, rel, line, contextLines, missingNote) {
+  if (!root) return { available: false, note: missingNote || "not available", rows: [] };
+  const abs = path.join(root, toPosix(rel).split("/").join(path.sep));
+  if (!exists(abs)) return { available: false, note: "file not found: " + rel, rows: [] };
+  return { available: true, note: "", rows: snippetRows(readLatin1(abs), line, contextLines) };
+}
+function verificationHint(model, f) {
+  if (f.priority === "Critical" || f.category === "jquery-core-old") return "jQuery " + model.profile.jquery.targetVersion + "과 Migrate 파일 존재, core -> migrate 로드 순서, 중복 core 로드 여부, 주요 화면 JQMIGRATE/JS error를 확인하세요.";
+  if (f.priority === "XssHigh" || f.category === "dom-sink" || f.category === "wrapper-dom-sink") return "값 출처가 서버/사용자 입력인지 확인하고, HTML이 필요 없으면 .text(), 필요하면 escape/sanitizer와 신뢰 경계를 확인하세요.";
+  if (f.category.indexOf("bool-attr") === 0) return "변수 값 도메인(Y/N, true/false, 1/0 등)과 disabled/checked/readonly 동작이 기존 화면과 같은지 확인하세요.";
+  if (f.category === "jqxhr-shorthand") return "이 호출이 AJAX 콜백인지 DOM/다른 객체 메서드인지 확인하고, 성공/실패 콜백 인자의 출처를 확인하세요.";
+  if (f.category === "live-die") return "동적으로 추가되는 요소 이벤트라면 .on(event, selector, handler) 위임 방식으로 바꾼 뒤 이벤트가 계속 동작하는지 확인하세요.";
+  if (f.category === "jquery-core-unknown") return "파일 배너/실제 배포 파일에서 jQuery 버전을 확인하고 3.5 미만이면 patch-jquery 대상에 포함하세요.";
+  return "AS-IS/TO-BE 차이를 확인하고 해당 화면에서 기존 동작, JS error, JQMIGRATE warning 여부를 확인하세요.";
+}
+function changePlanText(model, f) {
+  if (f.action === "Changed") return "자동수정 적용/예정: " + trunc(f.before || f.pattern, 120) + " -> " + trunc(f.after || f.suggestion || "", 160);
+  if (f.suggestion || f.after) return "권장 조치: " + trunc(f.suggestion || f.after, 220);
+  if (f.priority === "Critical") return "patch-jquery 모드에서 jQuery core script src를 " + model.profile.jquery.targetVersion + " + Migrate 조합으로 교체합니다.";
+  if (f.priority === "XssHigh") return "자동수정 금지. 값 출처와 HTML 필요 여부를 확인한 뒤 .text()/escape/sanitizer 중 하나로 수동 조치하세요.";
+  return "자동 변경하지 않습니다. 코드 의도를 확인한 뒤 수동 조치 또는 project-profile 학습 규칙으로 분류를 보정하세요.";
+}
+function buildFocusDetails(model) {
+  const hasTarget = model.targetWcRoot && isDir(model.targetWcRoot);
+  return model.focus.slice(0, 100).map(function (f, i) {
+    const ctx = model.ctxByRel[f.rel];
+    const line = f.line || (ctx ? lineOf(ctx.lineStarts, f.idx || 0) : 1);
+    return {
+      rank: i + 1, rel: f.rel, line: line, category: f.category, priority: f.priority,
+      confidence: f.confidence, action: f.action, pattern: f.pattern,
+      reason: f.reason, change: changePlanText(model, f), verify: verificationHint(model, f),
+      asIs: ctx ? { available: true, note: "", rows: snippetRows(ctx.text, line, 5) } : snippetFromRoot(model.webContentRoot, f.rel, line, 5, "source not available"),
+      toBe: snippetFromRoot(hasTarget ? model.targetWcRoot : "", f.rel, line, 5, hasTarget ? "TO-BE file not available" : "TO-BE not generated in this mode")
+    };
+  });
+}
+function focusQueueHtml(model, details) {
+  let h = "<table><thead><tr><th>순위</th><th>파일</th><th>라인</th><th>유형</th><th>우선순위</th><th>사유</th></tr></thead><tbody>";
+  details.forEach(function (d, i) {
+    h += "<tr><td>" + d.rank + '</td><td><button type="button" class="filelink" onclick="openFocusDetail(' + i + ')">' + htmlEsc(d.rel) + "</button></td><td>" + htmlEsc(d.line) + "</td><td>" + htmlEsc(d.category) + "</td><td>" + htmlEsc(d.priority) + "</td><td>" + htmlEsc(d.reason) + "</td></tr>";
+  });
+  return h + "</tbody></table>";
+}
 function writeIndexHtml(model) {
   const c = model.counters;
+  const focusDetails = buildFocusDetails(model);
   const parts = [];
   parts.push("<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\"><title>jQuery 3.5 조치 보고서</title><style>");
   parts.push("body{font-family:'Malgun Gothic',AppleGothic,sans-serif;margin:20px;background:#f5f6f8;color:#222}h1{font-size:20px}h2{font-size:16px;margin-top:28px;border-left:4px solid #3b6fd4;padding-left:8px}");
   parts.push(".cards{display:flex;flex-wrap:wrap;gap:10px}.card{background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px 16px;min-width:120px}.card .v{font-size:22px;font-weight:bold}.card .l{font-size:12px;color:#666}");
   parts.push("table{border-collapse:collapse;background:#fff;font-size:12px;margin-top:8px;width:100%}th,td{border:1px solid #ddd;padding:4px 8px;text-align:left;word-break:break-all}th{background:#eef1f6}");
   parts.push(".warn{color:#b26a00}.crit{color:#b00020;font-weight:bold}.ok{color:#1b5e20}.small{font-size:12px;color:#555}");
+  parts.push(".filelink{border:0;background:transparent;color:#174ea6;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;padding:0}.modalBackdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;display:none}.modalBox{position:absolute;inset:4%;background:#fff;border:1px solid #444;box-shadow:0 12px 40px rgba(0,0,0,.35);display:flex;flex-direction:column}.modalHead{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #ddd;background:#eef1f6}.modalTitle{font-weight:bold}.modalClose{border:1px solid #999;background:#fff;padding:3px 10px;cursor:pointer}.modalBody{padding:12px;overflow:auto}.detailGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.infoGrid{display:grid;grid-template-columns:130px 1fr;gap:4px 10px;font-size:12px;margin-bottom:12px}.infoGrid div:nth-child(odd){font-weight:bold;color:#555}.pane{border:1px solid #ddd;background:#fafafa}.pane h3{font-size:13px;margin:0;padding:6px 8px;background:#f0f0f0;border-bottom:1px solid #ddd}.codeLine{display:grid;grid-template-columns:46px 1fr;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap}.codeLine .ln{color:#777;text-align:right;padding:0 8px;border-right:1px solid #e0e0e0;user-select:none}.codeLine .txt{padding:0 8px}.codeLine.hit{background:#fff3cd}.noteBox{font:12px Consolas,Menlo,monospace;padding:10px;color:#666}@media(max-width:900px){.detailGrid{grid-template-columns:1fr}.modalBox{inset:2%}}");
   parts.push("</style></head><body>");
   parts.push("<h1>jQuery " + CVE_ID + " 조치 보고서 (" + TOOL_NAME + " v" + TOOL_VERSION + ")</h1>");
-  parts.push('<div class="small">Mode: ' + htmlEsc(c.Mode) + " / Source: " + htmlEsc(c.SourceRoot) + " / WebContent: " + htmlEsc(c.WebContentRoot) + " / Target: " + htmlEsc(c.TargetRoot) + "</div>");
+  parts.push('<div class="small">Mode: ' + htmlEsc(c.Mode) + " / jQuery target: " + htmlEsc(c.JqueryTargetVersion) + " / pass floor: " + htmlEsc(c.JqueryFloorVersion) + " / Source: " + htmlEsc(c.SourceRoot) + " / WebContent: " + htmlEsc(c.WebContentRoot) + " / Target: " + htmlEsc(c.TargetRoot) + "</div>");
   parts.push('<h2>요약</h2><div class="cards">');
   parts.push(kpiCard("전체 파일", c.TotalFiles, "#3b6fd4"));
   parts.push(kpiCard("페이지(JSP 등)", c.PageFiles, "#3b6fd4"));
   parts.push(kpiCard("JS 파일", c.JsFiles, "#3b6fd4"));
+  parts.push(kpiCard("3.5 게이트", c.Gate35Blockers, "#b00020"));
   parts.push(kpiCard("Critical (구버전 jQuery)", c.Critical, "#b00020"));
   parts.push(kpiCard("XSS 고위험", c.XssHigh, "#b00020"));
   parts.push(kpiCard("수동 조치", c.Manual, "#b26a00"));
@@ -2668,12 +2826,12 @@ function writeIndexHtml(model) {
   parts.push(kpiCard("벤더 검토", c.VendorReview, "#546e7a"));
   parts.push(kpiCard("정적 HTML(저위험)", c.StaticHtmlLow, "#78909c"));
   parts.push("</div>");
-  parts.push("<h2>Critical: 3.5 미만 jQuery core 호출부 (" + model.oldCoreRefs.length + "건)</h2>");
+  parts.push("<h2>Critical: " + TARGET_JQUERY_FLOOR_VERSION + " 미만 jQuery core 호출부 (" + model.oldCoreRefs.length + "건)</h2>");
   parts.push(tableHtml(["페이지", "라인", "src", "버전"], model.oldCoreRefs.map(function (r) { return [r.page, r.line, r.raw, r.meta.ver]; })));
-  parts.push('<div class="small">이 항목은 plan/autofix에서는 자동 변경되지 않습니다. jquery-3.7.1.min.js / jquery-migrate-3.6.0.min.js 파일을 WebContent/js에 넣은 뒤 patch-jquery 모드로 교체하세요.</div>');
+  parts.push('<div class="small">이 항목은 plan/autofix에서는 자동 변경되지 않습니다. ' + htmlEsc(model.profile.jquery.coreFile) + " / " + htmlEsc(model.profile.jquery.migrateFile) + ' 파일을 WebContent/js에 넣은 뒤 patch-jquery 모드로 교체하세요.</div>');
   parts.push("<h2>FocusQueue 상위 100건 (사람이 봐야 할 업무 코드)</h2>");
-  parts.push(tableHtml(["순위", "파일", "라인", "유형", "우선순위", "사유"],
-    model.focus.slice(0, 100).map(function (f, i) { return [i + 1, f.rel, f.line, f.category, f.priority, f.reason]; })));
+  parts.push('<div class="small">파일명을 클릭하면 AS-IS/TO-BE 주변 코드, 판단 사유, 권장 조치, 확인 포인트가 모달로 열립니다.</div>');
+  parts.push(focusQueueHtml(model, focusDetails));
   parts.push("<h2>페이지 리스크</h2>");
   const riskPages = model.pages.filter(function (p) { return p.riskMultiCore || p.riskOldCore || p.riskMigrateMissing || p.riskMigrateBeforeCore; });
   parts.push(tableHtml(["페이지", "core 수", "버전", "구버전", "Migrate", "Migrate 순서"],
@@ -2694,6 +2852,8 @@ function writeIndexHtml(model) {
   recommendedActions(model).forEach(function (a) { parts.push("<li>" + htmlEsc(a) + "</li>"); });
   parts.push("</ol>");
   parts.push('<div class="small">상세 데이터: apiFindings.csv / focusQueue.csv / jspPages.csv / pageScriptEffective.csv / jquery35_report.xls</div>');
+  parts.push('<div id="focusDetailModal" class="modalBackdrop" onclick="if(event.target===this) closeFocusDetail();"><div class="modalBox"><div class="modalHead"><div id="focusModalTitle" class="modalTitle"></div><button type="button" class="modalClose" onclick="closeFocusDetail()">Close</button></div><div class="modalBody"><div id="focusModalInfo" class="infoGrid"></div><div class="detailGrid"><div class="pane"><h3>AS-IS</h3><div id="focusAsIs"></div></div><div class="pane"><h3>TO-BE</h3><div id="focusToBe"></div></div></div></div></div></div>');
+  parts.push("<script>window.__JQ35_FOCUS_DETAILS__=" + scriptJson(focusDetails) + ";\n(function(){function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c];});}function block(sn){if(!sn||!sn.available){return '<div class=\"noteBox\">'+esc(sn&&sn.note?sn.note:'not available')+'</div>';}return sn.rows.map(function(r){return '<div class=\"codeLine '+(r.hit?'hit':'')+'\"><span class=\"ln\">'+esc(r.n)+'</span><span class=\"txt\">'+esc(r.text)+'</span></div>';}).join('');}window.openFocusDetail=function(i){var d=window.__JQ35_FOCUS_DETAILS__[i];if(!d)return;document.getElementById('focusModalTitle').textContent='#'+d.rank+' '+d.rel+':'+d.line;document.getElementById('focusModalInfo').innerHTML='<div>유형</div><div>'+esc(d.category)+' / '+esc(d.priority)+' / '+esc(d.confidence)+'</div><div>패턴</div><div>'+esc(d.pattern)+'</div><div>왜 문제인가</div><div>'+esc(d.reason)+'</div><div>어떻게 바꾸나</div><div>'+esc(d.change)+'</div><div>확인할 것</div><div>'+esc(d.verify)+'</div>';document.getElementById('focusAsIs').innerHTML=block(d.asIs);document.getElementById('focusToBe').innerHTML=block(d.toBe);document.getElementById('focusDetailModal').style.display='block';};window.closeFocusDetail=function(){document.getElementById('focusDetailModal').style.display='none';};document.addEventListener('keydown',function(e){if(e.key==='Escape')closeFocusDetail();});})();</script>");
   parts.push("</body></html>");
   writeUtf8(path.join(model.reportRoot, "index.html"), parts.join("\n"), false);
 }
@@ -2719,9 +2879,10 @@ function packetLines(model) {
   const L = [];
   L.push("JQUERY35_LOCAL_AGENT_PACKET v" + TOOL_VERSION);
   ["SourceRoot", "WebContentRoot", "TargetRoot", "ReportRoot", "Mode", "TotalFiles", "TextFiles", "PageFiles", "JsFiles",
+    "JqueryTargetVersion", "JqueryFloorVersion", "Gate35Blockers",
     "ChangedFiles", "ApiFindings", "Critical", "AutoFixed", "AutoFixed2", "Review", "Manual", "XssHigh", "FocusQueue",
     "VendorReview", "StaticHtmlLow", "JqueryLoads", "OldJqueryBelow350", "PageRiskMultipleJqueryCore",
-    "PageRiskOldJqueryCore", "PageRiskMigrateMissing", "UnresolvedRefs", "AjaxEndpoints", "JsSyntaxFail",
+    "PageRiskOldJqueryCore", "PageRiskMigrateMissing", "PageRiskMigrateBeforeCore", "UnresolvedRefs", "AjaxEndpoints", "JsSyntaxFail",
     "ReviewCasesTotal", "ReviewCasesInPack", "LearnedWrapperCount", "LearnedFindingOverrides",
     "LibraryCounts", "GitInfo", "OldJquerySrcs"].forEach(function (k) {
       L.push(k + "=" + c[k]);
@@ -2777,7 +2938,7 @@ function writeChatSummary(model) {
   L.push("전체 " + c.TotalFiles + "개 파일 / 페이지 " + c.PageFiles + " / JS " + c.JsFiles);
   L.push("");
   L.push("핵심 수치");
-  L.push("- Critical(3.5 미만 jQuery core 호출부): " + c.Critical + "건 -> patch-jquery 모드로 교체 (자동수정 아님)");
+  L.push("- 3.5 게이트(" + c.JqueryFloorVersion + " 미만 jQuery core 호출부): " + c.Gate35Blockers + "건 -> patch-jquery 모드로 " + c.JqueryTargetVersion + " 교체 (자동수정 아님)");
   L.push("- 안전 자동수정(AutoFixed): " + c.AutoFixed + "건 / 콜사이트 추론 자동수정(AutoFixed2): " + c.AutoFixed2 + "건");
   L.push("- 수동 조치(Manual): " + c.Manual + "건 / 검토(Review): " + c.Review + "건");
   L.push("- DOM XSS 고위험(XssHigh): " + c.XssHigh + "건 (jQuery 업그레이드와 별개로 조치 필요)");
@@ -2788,7 +2949,8 @@ function writeChatSummary(model) {
   L.push("페이지 리스크");
   L.push("- jQuery core 중복 로드 페이지: " + c.PageRiskMultipleJqueryCore);
   L.push("- 구버전 core 사용 페이지: " + c.PageRiskOldJqueryCore);
-  L.push("- Migrate 누락 페이지(3.5+ 기준): " + c.PageRiskMigrateMissing);
+  L.push("- Migrate 누락 페이지(" + c.JqueryFloorVersion + "+ 기준): " + c.PageRiskMigrateMissing);
+  L.push("- Migrate 선로드 페이지: " + c.PageRiskMigrateBeforeCore);
   L.push("- 미해석 참조: " + c.UnresolvedRefs);
   L.push("");
   L.push("구버전 jQuery 호출부");
@@ -2852,7 +3014,7 @@ function writePrReport(model) {
   L.push("# jQuery " + CVE_ID + " 보안 조치");
   L.push("");
   L.push("## 목적");
-  L.push("- " + CVE_ID + " (jQuery htmlPrefilter XSS) 대응: jQuery core를 3.5.0 이상으로 상향");
+  L.push("- " + CVE_ID + " (jQuery htmlPrefilter XSS) 대응: jQuery core를 " + TARGET_JQUERY_FLOOR_VERSION + " 이상으로 상향");
   L.push("- 적용 조합: jQuery " + model.profile.jquery.targetVersion + " + jQuery Migrate " + model.profile.jquery.migrateVersion);
   L.push("- Migrate는 구버전 API 호환 유지 및 경고 수집 목적 (안정화 후 제거 검토)");
   L.push("");
@@ -2938,7 +3100,8 @@ function writeSampleProfile(model) {
       coreFile: "jquery-" + DEFAULT_JQUERY_VERSION + ".min.js",
       migrateFile: "jquery-migrate-" + DEFAULT_MIGRATE_VERSION + ".min.js",
       newJquerySrc: "",
-      newMigrateSrc: ""
+      newMigrateSrc: "",
+      migrateTrace: false
     },
     probe: { enabled: true, injectTargetHints: ["WEB-INF/layouts/common_script_lib.jsp"] },
     learnedWrappers: [],
@@ -3004,42 +3167,27 @@ function writeReviewPack(model) {
   const R = model.reportRoot;
   ensureDir(R);
   const L = [];
-  L.push("JQUERY35_AI_REVIEW_PACK v" + TOOL_VERSION);
-  L.push("SourceRoot=" + model.sourceRoot);
-  L.push("Round=" + model.reviewRound);
-  L.push("TotalAmbiguousGroups=" + model.reviewCasesAll);
-  L.push("CasesInThisPack=" + model.reviewCases.length);
-  L.push("");
-  L.push("이 파일은 폐쇄망 코드 전체가 아니라, 애매하게 분류된 코드 지점 " + model.reviewCases.length + "곳의 함수명/앞뒤 몇 줄만 담고 있습니다.");
-  L.push("문자열 내용은 <STR:길이등급>으로 대체되어 실제 값이 들어있지 않습니다. 하나의 CASE에 답하면 그 지식이 관련된 모든 호출부(FanOut)에 한번에 적용됩니다.");
-  L.push("답변은 맨 아래 'ANSWER FORMAT'에 맞춰 JSON을 작성해 project-profile.json에 병합한 뒤, 같은 --report 폴더로 --mode review-pack (또는 plan)을 다시 실행하세요.");
+  L.push("JQUERY35_AI_REVIEW_PACK v" + TOOL_VERSION + " r=" + model.reviewRound + " cases=" + model.reviewCases.length + "/" + model.reviewCasesAll);
+  L.push("Return JSON only. roles=ajaxSuccessJson|domSinkArg|safeWrapper decisions=xss-high|review|manual|static-safe|vendor-review|ignored");
   L.push("");
   model.reviewCases.forEach(function (g, i) {
-    L.push("---- CASE " + (i + 1) + "/" + model.reviewCases.length + " : " + g.caseId + " ----");
-    L.push("Kind=" + (g.kind === "FN" ? "function:" + g.name : "pattern:" + g.name));
-    if (g.kind === "FN") L.push("CallSiteCount(approx)=" + g.fanout);
-    L.push("OccurrencesInThisGroup=" + g.count + " (showing up to 5 locations)");
-    g.sampleLocations.forEach(function (loc) { L.push("  - " + loc); });
-    L.push("DominantCategories=" + g.topCategories.join(", "));
-    L.push("CurrentClassification=" + g.findings[0].priority + " (confidence " + g.findings[0].confidence + ")");
-    L.push("Excerpt:");
-    L.push(g.excerpt);
-    L.push("Question: " + g.question);
+    L.push("---- CASE " + (i + 1) + "/" + model.reviewCases.length + " id=" + g.caseId + " ----");
+    L.push("k=" + (g.kind === "FN" ? "fn" : "pt") + " name=" + g.name + " fanout=" + (g.fanout || 0) + " occ=" + g.count + " cat=" + g.topCategories.join("|") + " pri=" + g.findings[0].priority + "/" + g.findings[0].confidence);
+    L.push("loc=" + g.sampleLocationsShort);
+    L.push("code:");
+    L.push(g.compactExcerpt);
+    L.push("q=" + g.shortQuestion);
     L.push("");
   });
-  L.push("---- ANSWER FORMAT (이 형태의 JSON을 만들어 project-profile.json에 병합하세요) ----");
+  L.push("ANSWER_JSON=");
   L.push(JSON.stringify({
     learnedWrappers: [
-      { caseId: "예: FN-a1b2c3", name: "함수명", role: "ajaxSuccessJson 또는 domSinkArg 또는 safeWrapper", calleeParamIndex: 1, sinkParamIndex: 0, notes: "판단 근거" }
+      { caseId: "", name: "", role: "ajaxSuccessJson|domSinkArg|safeWrapper", calleeParamIndex: 1, sinkParamIndex: 0, notes: "" }
     ],
     learnedFindings: [
-      { caseId: "예: PT-9f8e7d...(위 CASE의 caseId 그대로)", name: "위 CASE의 Kind= 뒤에 나온 이름 그대로 (예: showResult) - 대조용, 선택이지만 권장", decision: "xss-high 또는 review 또는 manual 또는 static-safe 또는 vendor-review 또는 ignored", notes: "판단 근거" }
+      { caseId: "", name: "", decision: "xss-high|review|manual|static-safe|vendor-review|ignored", notes: "" }
     ]
-  }, null, 2));
-  L.push("");
-  L.push("참고: learnedWrappers는 이 함수/래퍼의 모든 호출부에 규칙을 전파합니다(자동수정은 하지 않고 분류에만 영향).");
-  L.push("      learnedFindings는 이 CASE 그룹 전체의 분류만 덮어씁니다(마찬가지로 자동수정은 하지 않음).");
-  L.push("      learnedFindings에 name을 함께 적으면, 다음 라운드에서 caseId가 혹시 다른 코드 위치와 겹치더라도 이름이 다르면 적용을 건너뛰고 경고합니다(안전장치).");
+  }));
   const capLines = positiveIntOpt(model.opts["max-review-lines"], 300);
   let lines = L;
   if (lines.length > capLines) {
@@ -3055,16 +3203,16 @@ function writeReviewPack(model) {
       return {
         caseId: g.caseId, kind: g.kind, name: g.name,
         fanout: g.fanout, occurrences: g.count,
-        sampleLocations: g.sampleLocations,
+        sampleLocations: g.sampleLocationsShort,
         categories: g.topCategories,
         currentPriority: g.findings[0].priority,
         currentConfidence: g.findings[0].confidence,
-        question: g.question,
-        excerpt: g.excerpt
+        question: g.shortQuestion,
+        excerpt: g.compactExcerpt
       };
     })
   };
-  writeUtf8(path.join(R, "ai_review_pack.json"), JSON.stringify(jsonOut, null, 2), false);
+  writeUtf8(path.join(R, "ai_review_pack.json"), JSON.stringify(jsonOut) + "\n", false);
   log("review pack: " + model.reviewCases.length + "/" + model.reviewCasesAll + " ambiguous groups (round " + model.reviewRound + ")");
 }
 
@@ -3284,8 +3432,8 @@ function doVerifyClean(model, opts) {
     (level === "FAIL" ? fail : level === "WARN" ? warn : log)(name + ": " + detail);
   };
   if (model.oldCoreRefs.length > 0) {
-    add("FAIL", "old-jquery-refs", model.oldCoreRefs.length + " script tag(s) still load jQuery < 3.5.0: " + model.counters.OldJquerySrcs);
-  } else add("PASS", "old-jquery-refs", "no jQuery < 3.5.0 references");
+    add("FAIL", "old-jquery-refs", model.oldCoreRefs.length + " script tag(s) still load jQuery < " + TARGET_JQUERY_FLOOR_VERSION + ": " + model.counters.OldJquerySrcs);
+  } else add("PASS", "old-jquery-refs", "no jQuery < " + TARGET_JQUERY_FLOOR_VERSION + " references");
   const multi = model.pages.filter(function (p) { return p.riskMultiCore; });
   if (multi.length > 0) add("FAIL", "multiple-jquery-core", multi.length + " page(s): " + multi.slice(0, 5).map(function (p) { return p.rel; }).join(", "));
   else add("PASS", "multiple-jquery-core", "no page loads jQuery core twice");
@@ -3303,8 +3451,8 @@ function doVerifyClean(model, opts) {
   if (crit.length > 0) add("FAIL", "critical-findings", crit.length + " critical finding(s) remain");
   else add("PASS", "critical-findings", "no critical findings");
   const mig = model.pages.filter(function (p) { return p.riskMigrateMissing; });
-  if (mig.length > 0) add("WARN", "migrate-missing", mig.length + " page(s) load jQuery 3.5+ without Migrate: " + mig.slice(0, 5).map(function (p) { return p.rel; }).join(", "));
-  else add("PASS", "migrate-missing", "all jQuery 3.5+ pages load Migrate");
+  if (mig.length > 0) add("WARN", "migrate-missing", mig.length + " page(s) load jQuery " + TARGET_JQUERY_FLOOR_VERSION + "+ without Migrate: " + mig.slice(0, 5).map(function (p) { return p.rel; }).join(", "));
+  else add("PASS", "migrate-missing", "all jQuery " + TARGET_JQUERY_FLOOR_VERSION + "+ pages load Migrate");
   const migBefore = model.pages.filter(function (p) { return p.riskMigrateBeforeCore; });
   if (migBefore.length > 0) add("WARN", "migrate-order", migBefore.length + " page(s) load Migrate before jQuery core");
   else add("PASS", "migrate-order", "migrate load order OK");
@@ -3446,11 +3594,17 @@ function selfTest(opts) {
     check("staticHtmlLow >= 1 (append option literal)", c1.StaticHtmlLow >= 1, "got " + c1.StaticHtmlLow);
     check("vendorReview >= 1 (jqgrid fixture)", c1.VendorReview >= 1, "got " + c1.VendorReview);
     check("focusQueue > 0", c1.FocusQueue > 0, "got " + c1.FocusQueue);
+    const trimPlanFinding = m1.findings.find(function (f) { return f.rel === "js/util.js" && f.category === "trim-deprecated"; });
+    check("trim-deprecated deferred for 3.5.1 landing",
+      !!trimPlanFinding && trimPlanFinding.priority === "StaticHtmlLow" && trimPlanFinding.action === "Ignored" && !m1.focus.some(function (f) { return f.category === "trim-deprecated"; }),
+      trimPlanFinding ? JSON.stringify([trimPlanFinding.priority, trimPlanFinding.action]) : "finding not found");
     check("effective include resolved (list.jsp sees layout core)", m1.pages.some(function (p) { return p.rel.indexOf("views/sample/list.jsp") >= 0 && p.oldCore && p.effectiveScripts >= 3; }), "");
     check("function-bind not touched (onRow.bind)", !m1.findings.some(function (f) { return f.rel === "js/util.js" && f.category === "bind-to-on" && f.action === "Changed" && f.line >= 16; }), "");
     ["summary.csv", "apiFindings.csv", "focusQueue.csv", "critical.csv", "assistant_packet.txt", "chat_summary.txt", "index.html", "jquery35_report.xls", "jspPages.csv", "pageScriptEffective.csv", "ajaxEndpoints.csv", "mock_routes.json"].forEach(function (f) {
       check("report file " + f, exists(path.join(r1, f)), "");
     });
+    const indexHtml = readUtf8(path.join(r1, "index.html"));
+    check("dashboard focus split-view modal present", indexHtml.indexOf("focusDetailModal") >= 0 && indexHtml.indexOf("__JQ35_FOCUS_DETAILS__") >= 0 && indexHtml.indexOf("openFocusDetail(") >= 0, "");
 
     log("self-test 2/8: autofix");
     const m2 = buildModel(mk({ source: src, target: t1, report: r1 }), "autofix");
@@ -3494,19 +3648,23 @@ function selfTest(opts) {
     check("verify-clean FAIL (old jquery + probe)", v1.code === 2 && v1.failCount >= 2, "code=" + v1.code + " fail=" + v1.failCount);
 
     log("self-test 5/8: patch-jquery");
-    writeLatin1(path.join(wc, "js", "jquery-3.7.1.min.js"), "/*! jQuery v3.7.1 fixture */");
+    writeLatin1(path.join(wc, "js", "jquery-3.5.1.min.js"), "/*! jQuery v3.5.1 fixture */");
     writeLatin1(path.join(wc, "js", "jquery-migrate-3.6.0.min.js"), "/*! jQuery Migrate v3.6.0 fixture */");
     const t3 = path.join(base, "tobe_patch");
-    const m5 = buildModel(mk({ source: src, target: t3, report: r1 }), "patch-jquery");
+    const m5 = buildModel(mk({ source: src, target: t3, report: r1, "migrate-trace": true }), "patch-jquery");
     analyze(m5);
     writeTarget(m5, { patch: true });
     writeAllReports(m5, {});
     const layoutPatched = readLatin1(path.join(t3, "WebContent", "WEB-INF", "layouts", "common_script_lib.jsp"));
-    check("core swapped to 3.7.1", layoutPatched.indexOf("jquery-3.7.1.min.js") >= 0 && layoutPatched.indexOf("jquery-1.10.2.min.js") < 0, trunc(layoutPatched, 200));
+    check("core swapped to 3.5.1", layoutPatched.indexOf("jquery-3.5.1.min.js") >= 0 && layoutPatched.indexOf("jquery-1.10.2.min.js") < 0, trunc(layoutPatched, 200));
     check("migrate inserted after core", layoutPatched.indexOf("jquery-migrate-3.6.0.min.js") >= 0, "");
-    check("migrate after core order", layoutPatched.indexOf("jquery-3.7.1.min.js") < layoutPatched.indexOf("jquery-migrate-3.6.0.min.js"), "");
+    check("migrate after core order", layoutPatched.indexOf("jquery-3.5.1.min.js") < layoutPatched.indexOf("jquery-migrate-3.6.0.min.js"), "");
+    check("migrate tracing snippet after Migrate",
+      layoutPatched.indexOf("jquery-migrate-3.6.0.min.js") < layoutPatched.indexOf("jQuery.migrateTrace = true") &&
+      layoutPatched.indexOf("jQuery.migrateMute = false") > layoutPatched.indexOf("jquery-migrate-3.6.0.min.js"),
+      trunc(layoutPatched, 300));
     const secondPatched = readLatin1(path.join(t3, "WebContent", "WEB-INF", "views", "common", "second_page.jsp"));
-    check("second page swapped too", secondPatched.indexOf("jquery-3.7.1.min.js") >= 0, "");
+    check("second page swapped too", secondPatched.indexOf("jquery-3.5.1.min.js") >= 0, "");
     check("second migrate inserted", secondPatched.indexOf("jquery-migrate-3.6.0.min.js") >= 0, "");
     check("patch-jquery leaves non-script src text alone",
       secondPatched.indexOf('var auditCopy = "${pageContext.request.contextPath}/js/jquery-1.10.2.min.js"') >= 0 &&
@@ -3580,33 +3738,33 @@ function selfTest(opts) {
     writeReviewPack(mR2);
     check("round counter increments on second run in same report dir", mR2.reviewRound === 2, "got " + mR2.reviewRound);
 
-    const trimCaseId = caseIdOf("PT", "trim-deprecated@js/util.js");
+    const learnedCaseId = caseIdOf("FN", "renderCell");
     const overridePath = path.join(base, "learned-findings-profile.json");
     writeUtf8(overridePath, JSON.stringify({
-      learnedFindings: [{ caseId: trimCaseId, decision: "static-safe", notes: "always given a literal string in this codebase" }]
+      learnedFindings: [{ caseId: learnedCaseId, decision: "static-safe", notes: "renderCell escapes before this call in the real codebase" }]
     }, null, 2), false);
     const rOverride = path.join(base, "report_override");
     const mOv = buildModel(mk({ source: src, report: rOverride, profile: overridePath }), "plan");
     analyze(mOv);
-    const trimFinding = mOv.findings.find(function (f) { return f.rel === "js/util.js" && f.category === "trim-deprecated"; });
-    check("learnedFindings override reclassifies trim-deprecated to StaticHtmlLow",
-      !!trimFinding && trimFinding.priority === "StaticHtmlLow" && trimFinding.action === "Ignored",
-      trimFinding ? JSON.stringify([trimFinding.priority, trimFinding.action, trimFinding.reason]) : "finding not found");
+    const learnedFinding = mOv.findings.find(function (f) { return f.rel === "js/wrapper_demo.js" && f.category === "dom-sink" && f._groupName === "renderCell"; });
+    check("learnedFindings override reclassifies renderCell dom-sink to StaticHtmlLow",
+      !!learnedFinding && learnedFinding.priority === "StaticHtmlLow" && learnedFinding.action === "Ignored",
+      learnedFinding ? JSON.stringify([learnedFinding.priority, learnedFinding.action, learnedFinding.reason]) : "finding not found");
     check("caseIdOf produces distinct wide ids for adjacent numeric names (no truncation collision)",
       caseIdOf("FN", "btn0") !== caseIdOf("FN", "btn1") && caseIdOf("FN", "btn1") !== caseIdOf("FN", "btn2"),
       caseIdOf("FN", "btn0") + " / " + caseIdOf("FN", "btn1") + " / " + caseIdOf("FN", "btn2"));
 
     const overrideMismatchPath = path.join(base, "learned-findings-mismatch-profile.json");
     writeUtf8(overrideMismatchPath, JSON.stringify({
-      learnedFindings: [{ caseId: trimCaseId, name: "someUnrelatedFunctionName", decision: "static-safe", notes: "corroboration name deliberately wrong" }]
+      learnedFindings: [{ caseId: learnedCaseId, name: "someUnrelatedFunctionName", decision: "static-safe", notes: "corroboration name deliberately wrong" }]
     }, null, 2), false);
     const rMismatch = path.join(base, "report_override_mismatch");
     const mMismatch = buildModel(mk({ source: src, report: rMismatch, profile: overrideMismatchPath }), "plan");
     analyze(mMismatch);
-    const trimFindingMismatch = mMismatch.findings.find(function (f) { return f.rel === "js/util.js" && f.category === "trim-deprecated"; });
+    const learnedFindingMismatch = mMismatch.findings.find(function (f) { return f.rel === "js/wrapper_demo.js" && f.category === "dom-sink" && f._groupName === "renderCell"; });
     check("learnedFindings override skipped when name corroboration mismatches (safety net)",
-      !!trimFindingMismatch && trimFindingMismatch.priority === "Review" && trimFindingMismatch.action === "ReviewOnly",
-      trimFindingMismatch ? JSON.stringify([trimFindingMismatch.priority, trimFindingMismatch.action]) : "finding not found");
+      !!learnedFindingMismatch && learnedFindingMismatch.priority === "Review" && learnedFindingMismatch.action === "ReviewOnly",
+      learnedFindingMismatch ? JSON.stringify([learnedFindingMismatch.priority, learnedFindingMismatch.action]) : "finding not found");
   } catch (e) {
     check("no unexpected exception", false, e.stack || e.message);
   }

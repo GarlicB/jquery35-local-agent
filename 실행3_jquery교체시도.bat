@@ -2,7 +2,8 @@
 setlocal
 REM =====================================================
 REM  jquery35-local-agent v5 - patch-jquery
-REM  put jquery-3.7.1.min.js + jquery-migrate-3.6.0.min.js in WebContent\js first
+REM  put jquery-3.5.1.min.js + jquery-migrate-3.6.0.min.js in WebContent\js first
+REM  add --migrate-trace below only when detailed JQMIGRATE tracing is needed
 REM  Edit the 3 paths below for your environment.
 REM =====================================================
 set SOURCE=C:\work\legacy-app

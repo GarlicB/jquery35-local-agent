@@ -10,7 +10,7 @@ jquery35-local-agent v5 - 명령 예시 모음
 2) TO-BE 자동수정 (안전 항목만):
   node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode autofix
 
-3) jQuery 호출부 교체 (사전에 WebContent\js 에 jquery-3.7.1.min.js, jquery-migrate-3.6.0.min.js 배치):
+3) jQuery 호출부 교체 (사전에 WebContent\js 에 jquery-3.5.1.min.js, jquery-migrate-3.6.0.min.js 배치):
   node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode patch-jquery
 
 4) Runtime Probe 삽입:
@@ -37,15 +37,16 @@ jquery35-local-agent v5 - 명령 예시 모음
   -> report\ai_review_pack.txt 를 외부 AI에게 붙여넣고, 답변 JSON을 project-profile.json의
      learnedWrappers/learnedFindings 배열에 병합한 뒤 같은 명령을 다시 실행
 
-10) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 60개 체크):
+10) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 66개 체크):
   node run-jquery35-v5.js --mode self-test
 
 유용한 옵션:
   --profile "C:\work\legacy-app\project-profile.json"   경로변수/벤더패턴/프로브 대상/학습된 래퍼 커스터마이즈
-  --jquery-version 3.7.1 --migrate-version 3.6.0   교체 버전 변경
+  --jquery-version 3.5.1 --migrate-version 3.6.0   교체 버전 변경
   --inject-probe                                    autofix/patch-jquery 때 프로브도 같이 삽입
   --patch-jquery                                    autofix 때 core 교체도 같이 수행
+  --migrate-trace                                   patch-jquery 때 Migrate 바로 아래 tracing 옵션 삽입
   --safe-packet false / --include-snippets          packet에 짧은 코드조각 포함
   --max-packet-lines 600                            packet 줄수 제한 조정
-  --max-review-cases 20 / --context-lines 3 / --max-review-lines 300   review-pack 분량 조절
+  --max-review-cases 20 / --context-lines 1 / --max-review-lines 300   review-pack 분량 조절
   --no-lab                                          mock_routes.json 생성 생략
