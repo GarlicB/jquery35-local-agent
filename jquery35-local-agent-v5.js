@@ -2809,18 +2809,25 @@ function buildFocusDetails(model) {
 }
 function focusQueueHtml(model, details) {
   let h = "";
-  FOCUS_STAGE_ORDER.forEach(function (stage) {
+  buildScopeRows(model).forEach(function (stage) {
     const group = details.filter(function (d) { return d.stage === stage.key; });
-    h += '<div class="stageFocus ' + stage.tone + '"><div class="stageHead"><div><b>' + htmlEsc(stage.title) + '</b><span>' + htmlEsc(stage.badge) + '</span></div><strong>' + group.length + '</strong></div><div class="small">' + htmlEsc(stage.desc) + "</div>";
+    h += '<section class="stageFocus ' + stage.tone + '">';
+    h += '<div class="stageHead"><div><b>' + htmlEsc(stage.title) + '</b><span>' + htmlEsc(stage.badge) + '</span></div>';
+    h += '<div class="stageCounts"><div><b>' + htmlEsc(stage.count) + '</b><span>범위</span></div><div><b>' + htmlEsc(group.length) + '</b><span>큐</span></div></div></div>';
+    h += '<div class="stageBody"><div class="stagePlan">';
+    h += '<div class="stageLine"><b>목표</b><br>' + htmlEsc(stage.goal) + '</div>';
+    h += '<div class="stageLine"><b>할 일</b><br>' + htmlEsc(stage.doText) + '</div>';
+    h += '<div class="stageLine"><b>멈춤 기준</b><br>' + htmlEsc(stage.stop) + '</div>';
+    h += '<div class="stageFiles"><b>상세</b> ' + stage.files.join(" / ") + '</div></div><div class="stageQueue">';
     if (group.length === 0) {
-      h += '<div class="emptyQueue">이 단계에 표시할 FocusQueue 항목이 없습니다.</div></div>';
+      h += '<div class="emptyQueue">이 단계에 표시할 FocusQueue 항목이 없습니다.</div></div></div></section>';
       return;
     }
     h += '<div class="queueTable"><table><thead><tr><th>순위</th><th>파일</th><th>라인</th><th>유형</th><th>우선순위</th><th>사유</th></tr></thead><tbody>';
     group.forEach(function (d) {
       h += "<tr><td>" + d.rank + '</td><td><button type="button" class="filelink" onclick="openFocusDetail(' + d.modalIndex + ')">' + htmlEsc(d.rel) + "</button></td><td>" + htmlEsc(d.line) + "</td><td>" + htmlEsc(d.category) + "</td><td>" + htmlEsc(d.priority) + "</td><td>" + htmlEsc(d.reason) + "</td></tr>";
     });
-    h += "</tbody></table></div></div>";
+    h += "</tbody></table></div></div></div></section>";
   });
   return h;
 }
@@ -2875,18 +2882,6 @@ function buildScopeRows(model) {
     }
   ];
 }
-function scopeRoadmapHtml(model) {
-  const rows = buildScopeRows(model);
-  let h = '<div class="scopeGrid">';
-  rows.forEach(function (r) {
-    h += '<div class="scopeCard ' + r.tone + '"><div class="scopeTop"><div><div class="scopeTitle">' + htmlEsc(r.title) + '</div><div class="scopeBadge">' + htmlEsc(r.badge) + '</div></div><div class="scopeCount">' + htmlEsc(r.count) + '</div></div><div class="scopeGoal">' + htmlEsc(r.goal) + '</div><div class="scopeLine"><b>할 일</b><br>' + htmlEsc(r.doText) + '</div><div class="scopeLine"><b>멈춤 기준</b><br>' + htmlEsc(r.stop) + '</div></div>';
-  });
-  h += "</div>";
-  h += '<div class="reportLinks"><b>상세 파일</b> ';
-  h += uniq(rows.reduce(function (acc, r) { return acc.concat(r.files); }, [])).join(" / ");
-  h += "</div>";
-  return h;
-}
 function writeIndexHtml(model) {
   const c = model.counters;
   const focusDetails = buildFocusDetails(model);
@@ -2894,9 +2889,8 @@ function writeIndexHtml(model) {
   parts.push("<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\"><title>jQuery 3.5 조치 보고서</title><style>");
   parts.push("*{box-sizing:border-box}body{font-family:'Malgun Gothic',AppleGothic,sans-serif;margin:0;background:#eef2f6;color:#202733}.shell{max-width:1440px;margin:0 auto;padding:24px}h1{font-size:22px;line-height:1.25;margin:0;color:#151b24}h2{font-size:15px;margin:24px 0 10px;color:#1f2937}.topbar{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:18px 20px;display:flex;justify-content:space-between;gap:20px;box-shadow:0 8px 22px rgba(31,41,55,.06)}.eyebrow{font-size:11px;font-weight:700;letter-spacing:.04em;color:#5b6677;text-transform:uppercase}.subtitle{margin-top:8px;font-size:12px;color:#5b6677;word-break:break-all}.metaPills{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;min-width:260px}.pill{border:1px solid #d7ddea;border-radius:999px;background:#f7f9fc;color:#344054;font-size:12px;padding:5px 9px;white-space:nowrap}");
   parts.push(".cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}.card{background:#fff;border:1px solid #d8dee8;border-left:4px solid var(--accent);border-radius:8px;padding:11px 14px;min-width:0;box-shadow:0 4px 14px rgba(31,41,55,.04)}.card .v{font-size:24px;line-height:1.1;font-weight:800;color:#101828}.card .l{font-size:12px;color:#667085;margin-top:4px}a{color:#1a5fb4;text-decoration:none}a:hover{text-decoration:underline}.small{font-size:12px;color:#5b6677}.tableWrap,.queueTable{overflow:auto;border:1px solid #dfe5ef;border-radius:8px;background:#fff;margin-top:8px}table{border-collapse:collapse;background:#fff;font-size:12px;width:100%}th,td{border-bottom:1px solid #e6ebf2;padding:7px 9px;text-align:left;word-break:break-all;vertical-align:top}th{background:#f5f7fb;color:#344054;font-weight:700}tr:last-child td{border-bottom:0}.warn{color:#b26a00}.crit{color:#b00020;font-weight:bold}.ok{color:#1b5e20}");
-  parts.push(".scopeGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:10px}.scopeCard{background:#fff;border:1px solid #d8dee8;border-top:4px solid #78909c;border-radius:8px;padding:14px;min-height:170px;box-shadow:0 6px 18px rgba(31,41,55,.05)}.scopeCard.danger{border-top-color:#b42318}.scopeCard.warn{border-top-color:#b54708}.scopeCard.calm{border-top-color:#4e5f70}.scopeTop{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.scopeTitle{font-size:15px;font-weight:800;color:#1f2937}.scopeBadge{display:inline-block;margin-top:5px;padding:3px 8px;border:1px solid #d7ddea;border-radius:999px;font-size:11px;color:#5b6677;background:#f7f9fc}.scopeCount{font-size:30px;font-weight:800;line-height:1;color:#101828}.scopeGoal{margin-top:10px;font-size:12px;color:#344054}.scopeLine{margin-top:9px;font-size:12px;color:#5b6677}.reportLinks{margin-top:10px;background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:10px 12px;font-size:12px}");
-  parts.push(".stageFocus{background:#fff;border:1px solid #d8dee8;border-left:4px solid #78909c;border-radius:8px;margin-top:12px;padding:12px;box-shadow:0 4px 14px rgba(31,41,55,.04)}.stageFocus.danger{border-left-color:#b42318}.stageFocus.warn{border-left-color:#b54708}.stageFocus.calm{border-left-color:#4e5f70}.stageHead{display:flex;align-items:center;justify-content:space-between;gap:12px}.stageHead b{font-size:15px;color:#1f2937}.stageHead span{margin-left:8px;font-size:11px;color:#5b6677;border:1px solid #d7ddea;border-radius:999px;padding:2px 8px;background:#f7f9fc}.stageHead strong{font-size:22px;color:#101828}.emptyQueue{margin-top:9px;border:1px dashed #cfd7e3;border-radius:8px;background:#f8fafc;color:#667085;font-size:12px;padding:12px}");
-  parts.push("details{background:#fff;border:1px solid #d8dee8;border-radius:8px;margin-top:14px;padding:10px 12px}summary{cursor:pointer;font-weight:800;color:#1f2937}.detailBlock{margin-top:10px}.filelink{border:0;background:transparent;color:#1a5fb4;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;padding:0}.modalBackdrop{position:fixed;inset:0;background:rgba(15,23,42,.58);z-index:1000;display:none}.modalBox{position:absolute;inset:4%;background:#fff;border:1px solid #344054;border-radius:8px;box-shadow:0 20px 60px rgba(15,23,42,.35);display:flex;flex-direction:column}.modalHead{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #d8dee8;background:#f5f7fb}.modalTitle{font-weight:800}.modalClose{border:1px solid #98a2b3;border-radius:6px;background:#fff;padding:5px 11px;cursor:pointer}.modalBody{padding:12px;overflow:auto}.detailGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.infoGrid{display:grid;grid-template-columns:130px 1fr;gap:5px 10px;font-size:12px;margin-bottom:12px}.infoGrid div:nth-child(odd){font-weight:800;color:#475467}.pane{border:1px solid #d8dee8;border-radius:8px;background:#fbfcfe;overflow:hidden}.pane h3{font-size:13px;margin:0;padding:7px 9px;background:#f3f6fa;border-bottom:1px solid #d8dee8}.codeLine{display:grid;grid-template-columns:46px 1fr;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap}.codeLine .ln{color:#667085;text-align:right;padding:0 8px;border-right:1px solid #e4e9f1;user-select:none}.codeLine .txt{padding:0 8px}.codeLine.hit{background:#fff4cf}.noteBox{font:12px Consolas,Menlo,monospace;padding:10px;color:#667085}@media(max-width:1100px){.cards{grid-template-columns:repeat(3,minmax(0,1fr))}.scopeGrid{grid-template-columns:1fr}.topbar{display:block}.metaPills{justify-content:flex-start;margin-top:12px}}@media(max-width:700px){.shell{padding:14px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.detailGrid{grid-template-columns:1fr}.modalBox{inset:2%}}");
+  parts.push(".stageFocus{background:#fff;border:1px solid #d8dee8;border-left:4px solid #78909c;border-radius:8px;margin-top:12px;padding:14px;box-shadow:0 6px 18px rgba(31,41,55,.05)}.stageFocus.danger{border-left-color:#b42318}.stageFocus.warn{border-left-color:#b54708}.stageFocus.calm{border-left-color:#4e5f70}.stageHead{display:flex;align-items:center;justify-content:space-between;gap:12px}.stageHead b{font-size:16px;color:#1f2937}.stageHead span{margin-left:8px;font-size:11px;color:#5b6677;border:1px solid #d7ddea;border-radius:999px;padding:2px 8px;background:#f7f9fc}.stageCounts{display:flex;gap:8px;flex-shrink:0}.stageCounts div{min-width:58px;border:1px solid #dfe5ef;border-radius:8px;background:#f8fafc;padding:6px 8px;text-align:right}.stageCounts b{display:block;font-size:20px;line-height:1;color:#101828}.stageCounts span{display:block;margin:3px 0 0;border:0;background:transparent;padding:0;color:#667085}.stageBody{display:grid;grid-template-columns:minmax(260px,.42fr) minmax(0,1fr);gap:14px;margin-top:12px}.stagePlan{background:#f8fafc;border:1px solid #e3e8f0;border-radius:8px;padding:11px}.stageLine{font-size:12px;color:#5b6677;margin-top:9px}.stageLine:first-child{margin-top:0}.stageLine b,.stageFiles b{color:#344054}.stageFiles{font-size:12px;margin-top:10px;color:#5b6677}.stageQueue{min-width:0}.queueHint{margin-top:4px}.emptyQueue{border:1px dashed #cfd7e3;border-radius:8px;background:#f8fafc;color:#667085;font-size:12px;padding:12px}");
+  parts.push("details{background:#fff;border:1px solid #d8dee8;border-radius:8px;margin-top:14px;padding:10px 12px}summary{cursor:pointer;font-weight:800;color:#1f2937}.detailBlock{margin-top:10px}.filelink{border:0;background:transparent;color:#1a5fb4;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;padding:0}.modalBackdrop{position:fixed;inset:0;background:rgba(15,23,42,.58);z-index:1000;display:none}.modalBox{position:absolute;inset:4%;background:#fff;border:1px solid #344054;border-radius:8px;box-shadow:0 20px 60px rgba(15,23,42,.35);display:flex;flex-direction:column}.modalHead{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #d8dee8;background:#f5f7fb}.modalTitle{font-weight:800}.modalClose{border:1px solid #98a2b3;border-radius:6px;background:#fff;padding:5px 11px;cursor:pointer}.modalBody{padding:12px;overflow:auto}.detailGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.infoGrid{display:grid;grid-template-columns:130px 1fr;gap:5px 10px;font-size:12px;margin-bottom:12px}.infoGrid div:nth-child(odd){font-weight:800;color:#475467}.pane{border:1px solid #d8dee8;border-radius:8px;background:#fbfcfe;overflow:hidden}.pane h3{font-size:13px;margin:0;padding:7px 9px;background:#f3f6fa;border-bottom:1px solid #d8dee8}.codeLine{display:grid;grid-template-columns:46px 1fr;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap}.codeLine .ln{color:#667085;text-align:right;padding:0 8px;border-right:1px solid #e4e9f1;user-select:none}.codeLine .txt{padding:0 8px}.codeLine.hit{background:#fff4cf}.noteBox{font:12px Consolas,Menlo,monospace;padding:10px;color:#667085}@media(max-width:1100px){.cards{grid-template-columns:repeat(3,minmax(0,1fr))}.stageBody{grid-template-columns:1fr}.topbar{display:block}.metaPills{justify-content:flex-start;margin-top:12px}}@media(max-width:700px){.shell{padding:14px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.stageHead{align-items:flex-start}.stageCounts{display:grid;grid-template-columns:1fr 1fr}.detailGrid{grid-template-columns:1fr}.modalBox{inset:2%}}");
   parts.push("</style></head><body><main class=\"shell\">");
   parts.push('<section class="topbar"><div><div class="eyebrow">' + htmlEsc(TOOL_NAME + " v" + TOOL_VERSION) + '</div><h1>jQuery ' + htmlEsc(CVE_ID) + ' 조치 보고서</h1><div class="subtitle">Source: ' + htmlEsc(c.SourceRoot) + " / WebContent: " + htmlEsc(c.WebContentRoot) + " / Target: " + htmlEsc(c.TargetRoot) + '</div></div><div class="metaPills"><span class="pill">Mode ' + htmlEsc(c.Mode) + '</span><span class="pill">Target ' + htmlEsc(c.JqueryTargetVersion) + '</span><span class="pill">Pass ' + htmlEsc(c.JqueryFloorVersion) + '+</span></div></section>');
   parts.push('<h2>요약</h2><div class="cards">');
@@ -2907,10 +2901,8 @@ function writeIndexHtml(model) {
   parts.push(kpiCard("XSS 고위험", c.XssHigh, "#b00020"));
   parts.push(kpiCard("벤더 검토", c.VendorReview, "#546e7a"));
   parts.push("</div>");
-  parts.push("<h2>조치 범위 로드맵</h2>");
-  parts.push(scopeRoadmapHtml(model));
-  parts.push("<h2>단계별 FocusQueue (상위 100건)</h2>");
-  parts.push('<div class="small">1차 최소부터 확인하세요. 파일명을 클릭하면 AS-IS/TO-BE 주변 코드, 판단 사유, 권장 조치, 확인 포인트가 모달로 열립니다.</div>');
+  parts.push("<h2>단계별 조치 큐 (로드맵 + FocusQueue 상위 100건)</h2>");
+  parts.push('<div class="small queueHint">1차 최소부터 확인하세요. 각 단계 안에서 목표와 멈춤 기준을 보고, 파일명을 클릭하면 AS-IS/TO-BE 주변 코드와 확인 포인트가 모달로 열립니다.</div>');
   parts.push(focusQueueHtml(model, focusDetails));
   parts.push("<details><summary>상세 표 펼치기</summary><div class=\"detailBlock\">");
   parts.push("<h2>1차 상세: " + TARGET_JQUERY_FLOOR_VERSION + " 미만 jQuery core 호출부 (" + model.oldCoreRefs.length + "건)</h2>");
@@ -3690,7 +3682,7 @@ function selfTest(opts) {
     });
     const indexHtml = readUtf8(path.join(r1, "index.html"));
     check("dashboard focus split-view modal present", indexHtml.indexOf("focusDetailModal") >= 0 && indexHtml.indexOf("__JQ35_FOCUS_DETAILS__") >= 0 && indexHtml.indexOf("openFocusDetail(") >= 0, "");
-    check("dashboard remediation scope roadmap present", indexHtml.indexOf("조치 범위 로드맵") >= 0 && indexHtml.indexOf("단계별 FocusQueue") >= 0 && indexHtml.indexOf("1차 최소") >= 0 && indexHtml.indexOf("2차 안정화") >= 0 && indexHtml.indexOf("3차 최대/후속") >= 0, "");
+    check("dashboard staged action queue present", indexHtml.indexOf("단계별 조치 큐") >= 0 && indexHtml.indexOf("조치 범위 로드맵</h2>") < 0 && indexHtml.indexOf("단계별 FocusQueue") < 0 && indexHtml.indexOf("1차 최소") >= 0 && indexHtml.indexOf("2차 안정화") >= 0 && indexHtml.indexOf("3차 최대/후속") >= 0, "");
 
     log("self-test 2/8: autofix");
     const m2 = buildModel(mk({ source: src, target: t1, report: r1 }), "autofix");
