@@ -604,6 +604,14 @@ function resolveRef(rawRef, pageRel, model) {
   return r;
 }
 
+function scriptSrcInfo(tag, tagStart) {
+  const m = /\bsrc\s*=\s*(["'])([\s\S]*?)\1/i.exec(tag);
+  if (!m) return null;
+  const quoteAt = m[0].indexOf(m[1]);
+  const srcStart = tagStart + m.index + quoteAt + 1;
+  return { raw: m[2], srcStart: srcStart, srcEnd: srcStart + m[2].length };
+}
+
 function collectPageStructure(ctx) {
   const text = ctx.text;
   const refs = { scripts: [], css: [], includes: [], inlineRegions: [] };
@@ -613,9 +621,9 @@ function collectPageStructure(ctx) {
     const tag = m[0];
     const tagStart = m.index;
     const tagEnd = m.index + tag.length;
-    const srcM = tag.match(/\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
-    if (srcM) {
-      refs.scripts.push({ raw: srcM[1] !== undefined ? srcM[1] : srcM[2], idx: tagStart, tag: tag });
+    const srcInfo = scriptSrcInfo(tag, tagStart);
+    if (srcInfo) {
+      refs.scripts.push({ raw: srcInfo.raw, idx: tagStart, tag: tag, tagEnd: tagEnd, srcStart: srcInfo.srcStart, srcEnd: srcInfo.srcEnd });
     } else {
       const closeIdx = text.toLowerCase().indexOf("</script", tagEnd);
       const end = closeIdx >= 0 ? closeIdx : text.length;
@@ -1648,7 +1656,8 @@ function analyzePages(model) {
       const line = lineOf(ctx.lineStarts, s.idx);
       const row = {
         page: ctx.rel, line: line, raw: s.raw, resolved: r.resolved, exists: r.exists,
-        reason: r.reason, meta: meta, tag: s.tag, ctx: ctx
+        reason: r.reason, meta: meta, tag: s.tag, tagStart: s.idx, tagEnd: s.tagEnd,
+        srcStart: s.srcStart, srcEnd: s.srcEnd, ctx: ctx
       };
       model.pageScriptRows.push(row);
       events.push({ idx: s.idx, kind: "script", row: row });
@@ -2273,6 +2282,35 @@ function targetPathOf(model, ctx) {
   return path.join(model.targetRoot, ctx.projRel.split("/").join(path.sep));
 }
 
+function findScriptSrcSpan(text, refRow) {
+  if (refRow.srcStart !== undefined && refRow.srcEnd !== undefined && text.slice(refRow.srcStart, refRow.srcEnd) === refRow.raw) {
+    return { start: refRow.srcStart, end: refRow.srcEnd, tagStart: refRow.tagStart !== undefined ? refRow.tagStart : refRow.idx };
+  }
+  const scriptOpenRe = /<script\b[^>]*>/gi;
+  let m;
+  let best = null;
+  const wantedIdx = refRow.tagStart !== undefined ? refRow.tagStart : 0;
+  while ((m = scriptOpenRe.exec(text)) !== null) {
+    const info = scriptSrcInfo(m[0], m.index);
+    if (!info || info.raw !== refRow.raw) continue;
+    const distance = Math.abs(m.index - wantedIdx);
+    if (!best || distance < best.distance) {
+      best = { start: info.srcStart, end: info.srcEnd, tagStart: m.index, distance: distance };
+    }
+  }
+  return best;
+}
+
+function findScriptTagStartForSrc(text, src) {
+  const scriptOpenRe = /<script\b[^>]*>/gi;
+  let m;
+  while ((m = scriptOpenRe.exec(text)) !== null) {
+    const info = scriptSrcInfo(m[0], m.index);
+    if (info && info.raw === src) return m.index;
+  }
+  return -1;
+}
+
 function patchJqueryCore(model) {
   const jq = model.profile.jquery;
   if (model.oldCoreRefs.length === 0) {
@@ -2314,11 +2352,12 @@ function patchJqueryCore(model) {
           return;
         }
       }
-      if (text.indexOf(r.raw) < 0) {
-        model.patchResults.push([rel, r.raw, "SKIP", "raw src not found in target text (already changed?)"]);
+      const span = findScriptSrcSpan(text, r);
+      if (!span) {
+        model.patchResults.push([rel, r.raw, "SKIP", "script src span not found in target text (already changed?)"]);
         return;
       }
-      text = text.split(r.raw).join(newSrc);
+      text = text.slice(0, span.start) + newSrc + text.slice(span.end);
       changed = true;
       if (!firstNewSrc) firstNewSrc = newSrc;
       model.patchResults.push([rel, r.raw, "REPLACED", newSrc]);
@@ -2333,15 +2372,14 @@ function patchJqueryCore(model) {
     if (changed) {
       if (!/jquery[-.]migrate/i.test(text) && firstNewSrc) {
         const lines = text.split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].indexOf(firstNewSrc) >= 0) {
-            const indent = (lines[i].match(/^[ \t]*/) || [""])[0];
-            const slash2 = firstNewSrc.lastIndexOf("/");
-            const migSrc2 = jq.newMigrateSrc || (firstNewSrc.slice(0, slash2 + 1) + jq.migrateFile);
-            const eol = ctx.eol === "\r\n" && lines[i].slice(-1) === "\r" ? "\r" : "";
-            lines.splice(i + 1, 0, indent + '<script type="text/javascript" src="' + migSrc2 + '"></script>' + eol);
-            break;
-          }
+        const tagStart = findScriptTagStartForSrc(text, firstNewSrc);
+        if (tagStart >= 0) {
+          const lineIdx = text.slice(0, tagStart).split("\n").length - 1;
+          const indent = (lines[lineIdx].match(/^[ \t]*/) || [""])[0];
+          const slash2 = firstNewSrc.lastIndexOf("/");
+          const migSrc2 = jq.newMigrateSrc || (firstNewSrc.slice(0, slash2 + 1) + jq.migrateFile);
+          const eol = ctx.eol === "\r\n" && lines[lineIdx].slice(-1) === "\r" ? "\r" : "";
+          lines.splice(lineIdx + 1, 0, indent + '<script type="text/javascript" src="' + migSrc2 + '"></script>' + eol);
         }
         text = lines.join("\n");
       }
@@ -3324,6 +3362,8 @@ const ST_SECOND_JSP = [
   '<%@ page contentType="text/html; charset=UTF-8" %>',
   "<html><head>",
   '<script src="${pageContext.request.contextPath}/js/jquery-1.10.2.min.js"></script>',
+  '<script>var auditCopy = "${pageContext.request.contextPath}/js/jquery-1.10.2.min.js";</script>',
+  '<!-- deployment note: ${pageContext.request.contextPath}/js/jquery-1.10.2.min.js -->',
   "</head><body>second page</body></html>"
 ].join("\r\n");
 
@@ -3468,6 +3508,10 @@ function selfTest(opts) {
     const secondPatched = readLatin1(path.join(t3, "WebContent", "WEB-INF", "views", "common", "second_page.jsp"));
     check("second page swapped too", secondPatched.indexOf("jquery-3.7.1.min.js") >= 0, "");
     check("second migrate inserted", secondPatched.indexOf("jquery-migrate-3.6.0.min.js") >= 0, "");
+    check("patch-jquery leaves non-script src text alone",
+      secondPatched.indexOf('var auditCopy = "${pageContext.request.contextPath}/js/jquery-1.10.2.min.js"') >= 0 &&
+      secondPatched.indexOf('deployment note: ${pageContext.request.contextPath}/js/jquery-1.10.2.min.js') >= 0,
+      trunc(secondPatched, 300));
 
     log("self-test 6/8: verify-clean must PASS on patched target");
     fs.rmSync(path.join(t3, "WebContent", "js", "jquery-1.10.2.min.js"), { force: true });

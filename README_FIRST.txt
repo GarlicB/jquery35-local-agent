@@ -1,7 +1,7 @@
 jquery35-local-agent v5 - 빠른 시작
 ====================================
 
-준비물: Node.js 만 있으면 됩니다. npm install / 인터넷 불필요.
+준비물: Node.js 16+ 만 있으면 됩니다(18+ 권장). npm install / 인터넷 불필요.
 
 1. 이 폴더를 아무 곳에나 복사
 2. 각 실행*.bat 파일 상단의 경로 3개(SOURCE/TARGET/REPORT)를 내 환경에 맞게 수정
