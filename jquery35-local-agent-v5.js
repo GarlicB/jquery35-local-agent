@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.3.1";
+const TOOL_VERSION = "5.3.2";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -2853,23 +2853,25 @@ function focusQueueHtml(model, details, autoDetails) {
   buildScopeRows(model).forEach(function (stage) {
     const group = details.filter(function (d) { return d.stage === stage.key; });
     const autoGroup = autoDetails.filter(function (d) { return d.stage === stage.key; });
+    const autoLabel = autoGroup.length < stage.autoCount ? "상위 " + autoGroup.length + "/" + stage.autoCount + "건" : stage.autoCount + "건";
+    const queueLabel = group.length < stage.queueCount ? "상위 " + group.length + "/" + stage.queueCount + "건" : stage.queueCount + "건";
     h += '<section class="stageFocus ' + stage.tone + '">';
     h += '<div class="stageHead"><div><b>' + htmlEsc(stage.title) + '</b><span>' + htmlEsc(stage.badge) + '</span></div>';
-    h += '<div class="stageCounts"><div><b>' + htmlEsc(stage.count) + '</b><span>범위</span></div><div><b>' + htmlEsc(group.length) + '</b><span>큐</span></div></div></div>';
+    h += '<div class="stageCounts"><div><b>' + htmlEsc(stage.count) + '</b><span>전체</span></div><div><b>' + htmlEsc(stage.autoCount) + '</b><span>자동</span></div><div><b>' + htmlEsc(stage.queueCount) + '</b><span>큐</span></div></div></div>';
     h += '<div class="stageBody"><div class="stagePlan">';
     h += '<div class="stageLine"><b>목표</b><br>' + htmlEsc(stage.goal) + '</div>';
     h += '<div class="stageLine"><b>할 일</b><br>' + htmlEsc(stage.doText) + '</div>';
     h += '<div class="stageLine"><b>멈춤 기준</b><br>' + htmlEsc(stage.stop) + '</div>';
     h += '<div class="stageFiles"><b>상세</b> ' + stage.files.join(" / ") + '</div></div><div class="stageQueue">';
     if (autoGroup.length > 0) {
-      h += '<div class="subHead"><b>자동수정 미리보기</b><span>TO-BE에서 실제 바뀐 항목</span></div>';
+      h += '<div class="subHead"><b>자동수정 미리보기</b><span>TO-BE에서 실제 바뀐 항목 ' + htmlEsc(autoLabel) + '</span></div>';
       h += '<div class="queueTable"><table><thead><tr><th>순번</th><th>파일</th><th>라인</th><th>유형</th><th>TO-BE</th></tr></thead><tbody>';
       autoGroup.forEach(function (d) {
         h += "<tr><td>" + htmlEsc(d.rank) + '</td><td><button type="button" class="filelink" onclick="openFocusDetail(' + d.modalIndex + ')">' + htmlEsc(d.rel) + "</button></td><td>" + htmlEsc(d.line) + "</td><td>" + htmlEsc(d.category) + '</td><td><span class="status ' + statusClass(d) + '">' + htmlEsc(d.toBeStatus) + "</span></td></tr>";
       });
       h += "</tbody></table></div>";
     }
-    h += '<div class="subHead"><b>검토 큐</b><span>자동수정 대상이 아닌 수동 확인 항목</span></div>';
+    h += '<div class="subHead"><b>검토 큐</b><span>자동수정 대상이 아닌 수동 확인 항목 ' + htmlEsc(queueLabel) + '</span></div>';
     if (group.length === 0) {
       h += '<div class="emptyQueue">이 단계에 표시할 FocusQueue 항목이 없습니다.</div></div></div></section>';
       return;
@@ -2886,6 +2888,17 @@ function focusQueueHtml(model, details, autoDetails) {
 function findCount(model, fn) {
   let n = 0;
   model.findings.forEach(function (f) { if (fn(f)) n++; });
+  return n;
+}
+function isChangedAutoFinding(f) {
+  return f.action === "Changed" && (f.priority === "AutoFixed" || f.priority === "AutoFixed2");
+}
+function countStageAuto(model, key) {
+  return findCount(model, function (f) { return isChangedAutoFinding(f) && focusStageKey(f) === key; });
+}
+function countStageQueue(model, key) {
+  let n = 0;
+  model.focus.forEach(function (f) { if (focusStageKey(f) === key) n++; });
   return n;
 }
 function isCompatMinimalFinding(f) {
@@ -2905,33 +2918,39 @@ function isDeferredMaxFinding(f) {
 function buildScopeRows(model) {
   const c = model.counters;
   const coreUnknown = findCount(model, function (f) { return f.category === "jquery-core-unknown"; });
-  const minCount = c.Gate35Blockers + coreUnknown + c.PageRiskMultipleJqueryCore + c.PageRiskMigrateMissing + c.PageRiskMigrateBeforeCore;
-  const compatCount = findCount(model, isCompatMinimalFinding);
-  const safeAuto = c.AutoFixed + c.AutoFixed2;
-  const maxCount = findCount(model, isDeferredMaxFinding) + c.VendorReview;
-  return [
+  const minAuto = countStageAuto(model, "min");
+  const minQueue = countStageQueue(model, "min");
+  const compatAuto = countStageAuto(model, "compat");
+  const compatQueue = countStageQueue(model, "compat");
+  const maxAuto = countStageAuto(model, "max");
+  const maxQueue = countStageQueue(model, "max");
+  const minCount = Math.max(minQueue + minAuto, c.Gate35Blockers + coreUnknown + c.PageRiskMultipleJqueryCore + c.PageRiskMigrateMissing + c.PageRiskMigrateBeforeCore);
+  const compatCount = compatAuto + compatQueue;
+  const maxCount = Math.max(maxQueue + maxAuto, findCount(model, isDeferredMaxFinding) + c.VendorReview);
+  const rows = [
     {
-      key: "min", title: "1차 최소", badge: "취약점 통과", tone: "danger", count: minCount,
+      key: "min", title: "1차 최소", badge: "취약점 통과", tone: "danger", count: minCount, autoCount: minAuto, queueCount: minQueue,
       goal: "jQuery core를 " + c.JqueryTargetVersion + "로 교체하고 " + c.JqueryFloorVersion + " 미만 참조를 0건으로 만듭니다.",
       doText: "patch-jquery, Migrate 로드 순서, 중복 core, verify-clean FAIL 제거",
       stop: "verify-clean에서 old-jquery-refs / critical-findings / probe-leftover FAIL이 0건이면 1차 목표는 충족",
       files: [reportLink("critical.csv", "critical.csv"), reportLink("jqueryLoads.csv", "jqueryLoads.csv"), reportLink("jspPages.csv", "jspPages.csv"), reportLink("pageScriptEffective.csv", "pageScriptEffective.csv")]
     },
     {
-      key: "compat", title: "2차 안정화", badge: "깨짐 방지", tone: "warn", count: safeAuto + compatCount,
+      key: "compat", title: "2차 안정화", badge: "깨짐 방지", tone: "warn", count: compatCount, autoCount: compatAuto, queueCount: compatQueue,
       goal: "3.5.1에서 실제 오류가 나기 쉬운 업무 코드만 우선 정리합니다.",
       doText: ".size(), .load(), jqXHR success/error/complete, live/die, boolean attr, $.browser 후보 확인",
       stop: "주요 화면 JS error 0건이고 업무 플로우가 깨지지 않으면 다음 업무로 넘어가도 됩니다.",
       files: [reportLink("autoFixed.csv", "autoFixed.csv"), reportLink("manualQueue.csv", "manualQueue.csv"), reportLink("focusQueue.csv", "focusQueue.csv"), reportLink("runtime_test_checklist.txt", "runtime_test_checklist.txt")]
     },
     {
-      key: "max", title: "3차 최대/후속", badge: "장기 정리", tone: "calm", count: maxCount,
+      key: "max", title: "3차 최대/후속", badge: "장기 정리", tone: "calm", count: maxCount, autoCount: maxAuto, queueCount: maxQueue,
       goal: "이번 배포 필수는 아니지만 보안·유지보수 부채를 줄이는 범위입니다.",
       doText: "DOM XSS 후보, 벤더 라이브러리 교체, Migrate warning 0건, jQuery 4 대비 deprecated 정리",
       stop: "Migrate 제거 또는 jQuery 4 대비까지 목표일 때만 이 단계까지 확장",
       files: [reportLink("xssHigh.csv", "xssHigh.csv"), reportLink("vendorReview.csv", "vendorReview.csv"), reportLink("staticHtmlLow.csv", "staticHtmlLow.csv"), reportLink("pluginInventory.csv", "pluginInventory.csv")]
     }
   ];
+  return rows;
 }
 function writeIndexHtml(model) {
   const c = model.counters;
@@ -3738,6 +3757,7 @@ function selfTest(opts) {
     const indexHtml = readUtf8(path.join(r1, "index.html"));
     check("dashboard focus split-view modal present", indexHtml.indexOf("focusDetailModal") >= 0 && indexHtml.indexOf("__JQ35_FOCUS_DETAILS__") >= 0 && indexHtml.indexOf("openFocusDetail(") >= 0, "");
     check("dashboard staged action queue present", indexHtml.indexOf("단계별 조치 큐") >= 0 && indexHtml.indexOf("조치 범위 로드맵</h2>") < 0 && indexHtml.indexOf("단계별 FocusQueue") < 0 && indexHtml.indexOf("1차 최소") >= 0 && indexHtml.indexOf("2차 안정화") >= 0 && indexHtml.indexOf("3차 최대/후속") >= 0, "");
+    check("dashboard stage counts split total auto queue", indexHtml.indexOf("<span>전체</span>") >= 0 && indexHtml.indexOf("<span>자동</span>") >= 0 && indexHtml.indexOf("<span>큐</span>") >= 0, "");
 
     log("self-test 2/8: autofix");
     const m2 = buildModel(mk({ source: src, target: t1, report: r1 }), "autofix");
