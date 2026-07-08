@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.4.0";
+const TOOL_VERSION = "5.5.0";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -17,7 +17,7 @@ const PROBE_MARKER = "JQUERY35_RUNTIME_PROBE";
 const PAGE_EXTS = [".jsp", ".jspx", ".html", ".htm", ".tag", ".tagx", ".inc", ".xhtml"];
 const TEXT_EXTS = PAGE_EXTS.concat([".js", ".css"]);
 const EXCLUDE_DIRS = Object.assign(Object.create(null), { ".git": 1, ".svn": 1, ".hg": 1, "node_modules": 1, "target": 1, "build": 1, "dist": 1, ".idea": 1, ".settings": 1 });
-const MODES = ["plan", "autofix", "patch-jquery", "probe", "lab", "verify-clean", "pr-report", "packet", "review-pack", "hermes-pack", "airgap-manifest", "release-zip", "self-test"];
+const MODES = ["plan", "autofix", "patch-jquery", "probe", "lab", "verify-clean", "pr-report", "packet", "review-pack", "hermes-pack", "airgap-manifest", "release-zip", "ui", "self-test"];
 
 const DEFAULT_PATH_VARS = {
   "${js}": "/js",
@@ -644,6 +644,7 @@ function helpText() {
     "                for air-gapped review without network calls",
     "  airgap-manifest analyze + write airgap_manifest.json/txt only",
     "  release-zip   create public distribution zip from this tool directory",
+    "  ui            start local browser dashboard for running modes",
     "  self-test     build a sample project in temp dir and validate the tool end-to-end",
     "",
     "Options:",
@@ -652,6 +653,8 @@ function helpText() {
     "  --report <dir>            report output dir",
     "  --mode <mode>             see modes above (default: plan)",
     "  --port <n>                lab server port (default 18080)",
+    "                            ui mode: dashboard port (default 18088)",
+    "  --lab-port <n>            ui mode: child lab server port (default 18080)",
     "  --profile <file>          project-profile.json path (also carries learnedWrappers/",
     "                            learnedFindings from a previous review-pack round)",
     "  --rulepack <dir|json>      override public defaults/vendor/mock rules",
@@ -4154,6 +4157,7 @@ function releaseCandidateFiles() {
     "LICENSE",
     "project-profile.sample.json",
     "project-profile.public.sample.json",
+    "실행0_웹대시보드.bat",
     "실행1_분석만.bat",
     "실행2_TO_BE_자동수정.bat",
     "실행3_jquery교체시도.bat",
@@ -4554,6 +4558,325 @@ function startLab(model, opts) {
     log("  report  : http://localhost:" + port + "/_report/index.html");
     log("  probe rx: POST http://localhost:" + port + "/__probe/log -> " + probeLogDir);
     log("  serving : " + wcBase);
+    log("stop with Ctrl+C");
+  });
+  return server;
+}
+
+const UI_STATE_KEYS = ["source", "target", "report", "profile", "rulepack", "serverSource", "verifySource", "labPort", "migrateTrace", "noServerScan", "maxReviewCases", "contextLines", "maxReviewLines"];
+const UI_RUN_MODES = Object.assign(Object.create(null), {
+  "plan": 1, "autofix": 1, "patch-jquery": 1, "probe": 1, "verify-clean": 1,
+  "pr-report": 1, "packet": 1, "review-pack": 1, "hermes-pack": 1,
+  "airgap-manifest": 1, "release-zip": 1
+});
+
+function uiStateFile(opts) {
+  return path.resolve(opts["ui-state"] || path.join(os.homedir(), ".jquery35-local-agent-ui.json"));
+}
+
+function defaultUiState(opts) {
+  return {
+    source: opts.source || "",
+    target: opts.target || "",
+    report: opts.report || path.join(process.cwd(), "jquery35_report_v5"),
+    profile: opts.profile || "",
+    rulepack: opts.rulepack || "",
+    serverSource: opts["server-source"] || "",
+    verifySource: "",
+    labPort: String(positiveIntOpt(opts["lab-port"], 18080)),
+    migrateTrace: opts["migrate-trace"] === true,
+    noServerScan: opts["no-server-scan"] === true,
+    maxReviewCases: opts["max-review-cases"] || "20",
+    contextLines: opts["context-lines"] || "1",
+    maxReviewLines: opts["max-review-lines"] || "300"
+  };
+}
+
+function loadUiState(opts) {
+  const st = defaultUiState(opts);
+  const raw = readJsonMaybe(uiStateFile(opts), false);
+  if (raw) UI_STATE_KEYS.forEach(function (k) { if (raw[k] !== undefined) st[k] = raw[k]; });
+  ["source", "target", "report", "profile", "rulepack", "serverSource"].forEach(function (k) {
+    const optKey = k === "serverSource" ? "server-source" : k;
+    if (opts[optKey]) st[k] = opts[optKey];
+  });
+  if (opts["migrate-trace"]) st.migrateTrace = true;
+  if (opts["no-server-scan"]) st.noServerScan = true;
+  return st;
+}
+
+function saveUiState(opts, state) {
+  const out = {};
+  UI_STATE_KEYS.forEach(function (k) { out[k] = state[k]; });
+  writeUtf8(uiStateFile(opts), JSON.stringify(out, null, 2) + "\n", false);
+}
+
+function normalizedUiState(input, prev) {
+  const out = Object.assign({}, prev || {});
+  UI_STATE_KEYS.forEach(function (k) {
+    if (input[k] === undefined) return;
+    if (k === "migrateTrace" || k === "noServerScan") out[k] = input[k] === true || input[k] === "true";
+    else out[k] = String(input[k] == null ? "" : input[k]).trim();
+  });
+  out.labPort = String(positiveIntOpt(out.labPort, 18080));
+  out.maxReviewCases = String(positiveIntOpt(out.maxReviewCases, 20));
+  out.contextLines = String(positiveIntOpt(out.contextLines, 1));
+  out.maxReviewLines = String(positiveIntOpt(out.maxReviewLines, 300));
+  return out;
+}
+
+function uiAddArg(args, name, val) {
+  if (val !== undefined && val !== null && String(val) !== "") args.push("--" + name, String(val));
+}
+
+function uiBuildArgs(mode, state, forLab) {
+  if (!UI_RUN_MODES[mode] && mode !== "lab") throw new Error("unsupported ui mode: " + mode);
+  const args = ["--mode", mode];
+  const report = state.report || "";
+  if (mode === "release-zip") {
+    if (!report) throw new Error("report/release folder is required");
+    uiAddArg(args, "report", report);
+    return args;
+  }
+  let source = state.source || "";
+  if (mode === "verify-clean") source = state.verifySource || state.target || state.source || "";
+  if (!source) throw new Error("source is required");
+  if (!report) throw new Error("report folder is required");
+  uiAddArg(args, "source", source);
+  if (mode !== "verify-clean" && state.target) uiAddArg(args, "target", state.target);
+  if ((mode === "autofix" || mode === "patch-jquery" || mode === "probe") && !state.target) {
+    throw new Error("--target is required for mode " + mode);
+  }
+  uiAddArg(args, "report", report);
+  uiAddArg(args, "profile", state.profile);
+  uiAddArg(args, "rulepack", state.rulepack);
+  uiAddArg(args, "server-source", state.serverSource);
+  if (state.noServerScan) args.push("--no-server-scan");
+  if (state.migrateTrace && (mode === "patch-jquery" || mode === "probe" || mode === "autofix")) args.push("--migrate-trace");
+  if (mode === "review-pack" || mode === "hermes-pack") {
+    uiAddArg(args, "max-review-cases", state.maxReviewCases);
+    uiAddArg(args, "context-lines", state.contextLines);
+    uiAddArg(args, "max-review-lines", state.maxReviewLines);
+  }
+  if (forLab || mode === "lab") uiAddArg(args, "port", state.labPort || "18080");
+  return args;
+}
+
+function uiRunnerScript() {
+  return path.join(__dirname, "run-jquery35-v5.js");
+}
+
+function uiJobView(job) {
+  if (!job) return null;
+  return {
+    id: job.id,
+    mode: job.mode,
+    running: !!job.running,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt || "",
+    exitCode: job.exitCode,
+    error: job.error || "",
+    log: job.log.join("")
+  };
+}
+
+function uiAppendLog(job, chunk) {
+  job.log.push(String(chunk || ""));
+  const joined = job.log.join("");
+  if (joined.length > 120000) job.log = ["...(old log trimmed)\n", joined.slice(joined.length - 100000)];
+}
+
+function uiReportFileList(state) {
+  const R = state.report || "";
+  const files = [
+    ["index.html", "Main report", "report"],
+    ["jquery35_report.xls", "Excel report", "report"],
+    ["focusQueue.csv", "Focus queue", "queue"],
+    ["autoFixed.csv", "Auto fixes", "queue"],
+    ["manualQueue.csv", "Manual queue", "queue"],
+    ["serverEndpoints.csv", "Server endpoints", "server"],
+    ["ajaxToServerMap.csv", "AJAX to server", "server"],
+    ["hermes_server_evidence.json", "Server evidence JSON", "server"],
+    ["ai_review_pack.txt", "AI review pack", "review"],
+    ["ai_review_pack.json", "AI review JSON", "review"],
+    ["hermes_test_plan.md", "Hermes test plan", "review"],
+    ["hermes_review_matrix.csv", "Hermes matrix", "review"],
+    ["hermes_testbench.html", "Hermes testbench", "review"],
+    ["airgap_manifest.txt", "Airgap manifest", "airgap"],
+    ["airgap_manifest.json", "Airgap JSON", "airgap"],
+    ["mock_routes.json", "Mock routes", "lab"],
+    ["runtime_test_checklist.txt", "Runtime checklist", "lab"],
+    ["pr_description.md", "PR description", "ci"],
+    ["ci_checklist.md", "CI checklist", "ci"]
+  ];
+  const out = [];
+  if (R && isDir(R)) {
+    files.forEach(function (f) {
+      const abs = path.join(R, f[0]);
+      if (!exists(abs) || isDir(abs)) return;
+      const st = fs.statSync(abs);
+      out.push({ file: f[0], label: f[1], group: f[2], size: st.size, href: "/report/" + encodeURIComponent(f[0]) });
+    });
+    try {
+      fs.readdirSync(R).sort().forEach(function (name) {
+        if (!/\.zip$/i.test(name)) return;
+        const abs = path.join(R, name);
+        if (!exists(abs) || isDir(abs)) return;
+        const st = fs.statSync(abs);
+        out.push({ file: name, label: "Release ZIP", group: "release", size: st.size, href: "/report/" + encodeURIComponent(name) });
+      });
+    } catch (e) { }
+  }
+  return out;
+}
+
+function uiSendJson(res, code, obj) {
+  res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(JSON.stringify(obj));
+}
+
+function uiReadJson(req, cb) {
+  let body = "";
+  req.on("data", function (ch) {
+    body += ch;
+    if (body.length > 1024 * 1024) req.destroy();
+  });
+  req.on("end", function () {
+    try { cb(null, body ? JSON.parse(body) : {}); } catch (e) { cb(e); }
+  });
+}
+
+function uiServeReportFile(res, state, relRaw) {
+  const R = state.report || "";
+  if (!R || !isDir(R)) { res.writeHead(404); res.end("report folder not found"); return; }
+  const rel = normalizeWcPath(decodeURIComponent(relRaw || ""));
+  const abs = path.resolve(path.join(R, rel.split("/").join(path.sep)));
+  const root = path.resolve(R);
+  if (!(abs.toLowerCase() === root.toLowerCase() || abs.toLowerCase().indexOf(root.toLowerCase() + path.sep) === 0) || !exists(abs) || isDir(abs)) {
+    res.writeHead(404); res.end("not found"); return;
+  }
+  const ext = path.extname(abs).toLowerCase();
+  const ct = MIME[ext] || "application/octet-stream";
+  res.writeHead(200, { "Content-Type": ct + (/^(text\/|application\/json|application\/javascript)/.test(ct) ? "; charset=utf-8" : "") });
+  res.end(fs.readFileSync(abs));
+}
+
+function dashboardUiHtml() {
+  const fields = ["source:원본 source", "target:TO-BE target", "report:보고서/report", "profile:project-profile.json", "rulepack:rulepack", "serverSource:Java source", "verifySource:verify-clean source", "labPort:Lab port", "maxReviewCases:review cases", "contextLines:context lines", "maxReviewLines:review lines"].map(function (p) {
+    const a = p.split(":");
+    return "<div class=\"field\"><label>" + a[1] + "</label><input id=\"cfg_" + a[0] + "\"></div>";
+  }).join("");
+  return "<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\"><title>JQ35 Local Console</title><style>" +
+    "*{box-sizing:border-box}body{margin:0;background:#eef2f6;color:#1f2937;font-family:'Malgun Gothic',AppleGothic,Arial,sans-serif}.shell{max-width:1480px;margin:0 auto;padding:18px}.top{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:15px 17px;display:flex;justify-content:space-between;gap:14px}.eyebrow{font-size:11px;font-weight:800;color:#667085;text-transform:uppercase}.top h1{font-size:21px;margin:3px 0}.sub{font-size:12px;color:#667085;word-break:break-all}.pill{display:inline-block;border:1px solid #d7ddea;background:#f8fafc;border-radius:999px;padding:4px 9px;font-size:12px;margin:2px}.grid{display:grid;grid-template-columns:390px minmax(0,1fr);gap:14px;margin-top:14px}.panel{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:13px}.panel h2{font-size:14px;margin:0 0 10px}.form{display:grid;gap:8px}.field label{display:block;font-size:11px;font-weight:800;color:#475467;margin:0 0 3px}.field input{width:100%;border:1px solid #c8d1df;border-radius:6px;padding:8px 9px;font:12px Consolas,Menlo,monospace}.checks{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px}.checks label{border:1px solid #d8dee8;border-radius:6px;padding:7px;background:#f8fafc}.bar{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}button{border:1px solid #9aa7b8;background:#fff;border-radius:6px;padding:8px 11px;font-weight:800;font-size:12px;cursor:pointer}button.primary{background:#1d4ed8;color:#fff;border-color:#1d4ed8}button.danger{border-color:#b42318;color:#b42318}button:disabled{opacity:.48;cursor:not-allowed}.ops{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.op{border:1px solid #d8dee8;border-radius:8px;padding:11px;background:#fbfcfe;min-height:104px}.op b{display:block;font-size:13px}.op span{display:block;font-size:12px;color:#667085;margin:5px 0 10px;line-height:1.35}.op button{width:100%}.links{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.link{display:block;border:1px solid #d8dee8;background:#fbfcfe;border-radius:8px;padding:9px;text-decoration:none;color:#1f2937}.link b{display:block;font-size:12px}.link span{font-size:11px;color:#667085}.muted{font-size:12px;color:#667085}.ok{color:#166534}.bad{color:#b42318}.warn{color:#b54708}.log{height:360px;overflow:auto;background:#101828;color:#d1fadf;border-radius:8px;padding:10px;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap}.split{display:grid;grid-template-columns:1fr 1fr;gap:10px}@media(max-width:1120px){.grid,.split{grid-template-columns:1fr}.ops,.links{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:700px){.shell{padding:10px}.ops,.links{grid-template-columns:1fr}.top{display:block}}" +
+    "</style></head><body><main class=\"shell\"><section class=\"top\"><div><div class=\"eyebrow\">jquery35-local-agent v" + htmlEsc(TOOL_VERSION) + "</div><h1>JQ35 Local Console</h1><div class=\"sub\" id=\"pathLine\"></div></div><div><span class=\"pill\" id=\"jobPill\">idle</span><span class=\"pill\" id=\"labPill\">lab off</span></div></section><div class=\"grid\"><aside class=\"panel\"><h2>경로</h2><div class=\"form\" id=\"cfgForm\">" + fields +
+    "<div class=\"checks\"><label><input type=\"checkbox\" id=\"cfg_migrateTrace\"> migrate trace</label><label><input type=\"checkbox\" id=\"cfg_noServerScan\"> no server scan</label></div><div class=\"bar\"><button class=\"primary\" onclick=\"saveConfig()\">Save</button><button onclick=\"refresh()\">Refresh</button></div></div></aside><section><div class=\"panel\"><h2>실행</h2><div class=\"ops\" id=\"ops\"></div></div><div class=\"panel\" style=\"margin-top:14px\"><h2>기존 산출물</h2><div id=\"links\" class=\"links\"></div></div><div class=\"panel\" style=\"margin-top:14px\"><div class=\"split\"><div><h2>작업 로그</h2></div><div class=\"bar\" style=\"justify-content:flex-end;margin-top:0\"><button onclick=\"refresh()\">Refresh</button><button class=\"danger\" onclick=\"stopLab()\">Stop Lab</button></div></div><pre id=\"log\" class=\"log\"></pre></div></section></div></main><script>" +
+    "var state=null,job=null,lab=null;var ops=[['plan','분석','index/report 생성'],['autofix','TO-BE 자동수정','target 폴더 필요'],['patch-jquery','jQuery 교체','3.5.1 + Migrate'],['probe','Probe 삽입','검증용 target'],['review-pack','AI 리뷰팩','질문지 + 검수팩'],['hermes-pack','Hermes 검수팩','로컬 시험장 포함'],['verify-clean','운영전 검증','target 또는 verify source'],['pr-report','PR/CI 보고서','체크리스트 생성'],['airgap-manifest','폐쇄망 증빙','manifest 생성'],['release-zip','배포 ZIP','작은 반입 파일']];" +
+    "function byId(id){return document.getElementById(id)}function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c]})}function api(p,o){return fetch(p,Object.assign({headers:{'Content-Type':'application/json'}},o||{})).then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error(j.error||r.statusText);return j})})}" +
+    "function fill(){if(!state)return;['source','target','report','profile','rulepack','serverSource','verifySource','labPort','maxReviewCases','contextLines','maxReviewLines'].forEach(function(k){byId('cfg_'+k).value=state[k]||''});byId('cfg_migrateTrace').checked=!!state.migrateTrace;byId('cfg_noServerScan').checked=!!state.noServerScan;byId('pathLine').textContent='source: '+(state.source||'-')+' / target: '+(state.target||'-')+' / report: '+(state.report||'-')}" +
+    "function renderOps(){var h='';ops.forEach(function(o){h+='<div class=\"op\"><b>'+esc(o[1])+'</b><span>'+esc(o[2])+'</span><button onclick=\"runMode(\\''+o[0]+'\\')\" '+(job&&job.running?'disabled':'')+'>Run</button></div>'});h+='<div class=\"op\"><b>Local Lab</b><span>mock 서버 별도 실행</span><button onclick=\"startLab()\" '+(lab&&lab.running?'disabled':'')+'>Start Lab</button></div>';byId('ops').innerHTML=h}" +
+    "function renderLinks(files){var h='';(files||[]).forEach(function(f){h+='<a class=\"link\" target=\"_blank\" href=\"'+esc(f.href)+'\"><b>'+esc(f.label)+'</b><span>'+esc(f.file)+' · '+Math.ceil((f.size||0)/1024)+'KB</span></a>'});byId('links').innerHTML=h||'<div class=\"muted\">생성된 report 파일이 없습니다.</div>'}" +
+    "function renderStatus(){var jp=byId('jobPill');if(job&&job.running){jp.textContent='running '+job.mode;jp.className='pill warn'}else if(job){jp.textContent='last '+job.mode+' exit '+job.exitCode;jp.className='pill '+(job.exitCode===0?'ok':'bad')}else{jp.textContent='idle';jp.className='pill'}var lp=byId('labPill');if(lab&&lab.running){lp.innerHTML='<a target=\"_blank\" href=\"http://localhost:'+esc(state.labPort||'18080')+'/_pages\">lab '+esc(state.labPort||'18080')+'</a>';lp.className='pill ok'}else{lp.textContent='lab off';lp.className='pill'}byId('log').textContent=job?job.log:'';renderOps()}" +
+    "function collect(){var o={};['source','target','report','profile','rulepack','serverSource','verifySource','labPort','maxReviewCases','contextLines','maxReviewLines'].forEach(function(k){o[k]=byId('cfg_'+k).value});o.migrateTrace=byId('cfg_migrateTrace').checked;o.noServerScan=byId('cfg_noServerScan').checked;return o}" +
+    "function saveConfig(){return api('/api/config',{method:'POST',body:JSON.stringify(collect())}).then(function(d){state=d.state;fill();return d})}" +
+    "function runMode(m){saveConfig().then(function(){return api('/api/run',{method:'POST',body:JSON.stringify({mode:m})})}).then(function(){refresh()}).catch(function(e){alert(e.message)})}" +
+    "function startLab(){saveConfig().then(function(){return api('/api/lab/start',{method:'POST',body:'{}'})}).then(function(){refresh()}).catch(function(e){alert(e.message)})}function stopLab(){api('/api/lab/stop',{method:'POST',body:'{}'}).then(function(){refresh()}).catch(function(e){alert(e.message)})}" +
+    "function refresh(){api('/api/state').then(function(d){state=d.state;job=d.job;lab=d.lab;fill();renderLinks(d.files);renderStatus()})}setInterval(refresh,2000);refresh();" +
+    "</script></body></html>";
+}
+
+function startDashboardUi(opts) {
+  let state = loadUiState(opts);
+  let jobSeq = 0;
+  let currentJob = null;
+  let labJob = null;
+  function startChild(mode, args, asLab) {
+    const target = { id: ++jobSeq, mode: mode, running: true, startedAt: new Date().toISOString(), finishedAt: "", exitCode: null, error: "", log: [] };
+    const child = cp.spawn(process.execPath, [uiRunnerScript()].concat(args), { cwd: __dirname, stdio: ["ignore", "pipe", "pipe"] });
+    target.child = child;
+    uiAppendLog(target, "$ node run-jquery35-v5.js " + args.map(function (a) { return /\s/.test(a) ? '"' + a + '"' : a; }).join(" ") + "\n");
+    child.stdout.on("data", function (d) { uiAppendLog(target, d); });
+    child.stderr.on("data", function (d) { uiAppendLog(target, d); });
+    child.on("error", function (e) { target.error = e.message; uiAppendLog(target, "\n[spawn error] " + e.message + "\n"); });
+    child.on("close", function (code) {
+      target.running = false;
+      target.exitCode = code;
+      target.finishedAt = new Date().toISOString();
+      if (asLab && labJob === target) labJob = null;
+    });
+    if (asLab) labJob = target; else currentJob = target;
+    return target;
+  }
+  const server = http.createServer(function (req, res) {
+    try {
+      const u = new URL(req.url, "http://localhost");
+      if (req.method === "GET" && (u.pathname === "/" || u.pathname === "/index.html")) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(dashboardUiHtml());
+        return;
+      }
+      if (req.method === "GET" && u.pathname === "/api/state") {
+        uiSendJson(res, 200, { state: state, job: uiJobView(currentJob), lab: uiJobView(labJob), files: uiReportFileList(state) });
+        return;
+      }
+      if (req.method === "POST" && u.pathname === "/api/config") {
+        uiReadJson(req, function (err, body) {
+          if (err) { uiSendJson(res, 400, { ok: false, error: err.message }); return; }
+          state = normalizedUiState(body, state);
+          saveUiState(opts, state);
+          uiSendJson(res, 200, { ok: true, state: state });
+        });
+        return;
+      }
+      if (req.method === "POST" && u.pathname === "/api/run") {
+        uiReadJson(req, function (err, body) {
+          if (err) { uiSendJson(res, 400, { ok: false, error: err.message }); return; }
+          if (currentJob && currentJob.running) { uiSendJson(res, 409, { ok: false, error: "job already running" }); return; }
+          try {
+            const mode = String(body.mode || "");
+            const args = uiBuildArgs(mode, state, false);
+            const j = startChild(mode, args, false);
+            uiSendJson(res, 200, { ok: true, job: uiJobView(j) });
+          } catch (e) {
+            uiSendJson(res, 400, { ok: false, error: e.message });
+          }
+        });
+        return;
+      }
+      if (req.method === "POST" && u.pathname === "/api/lab/start") {
+        if (labJob && labJob.running) { uiSendJson(res, 409, { ok: false, error: "lab already running" }); return; }
+        try {
+          const args = uiBuildArgs("lab", state, true);
+          const j = startChild("lab", args, true);
+          uiSendJson(res, 200, { ok: true, lab: uiJobView(j) });
+        } catch (e) {
+          uiSendJson(res, 400, { ok: false, error: e.message });
+        }
+        return;
+      }
+      if (req.method === "POST" && u.pathname === "/api/lab/stop") {
+        if (labJob && labJob.running && labJob.child) {
+          labJob.child.kill();
+          uiAppendLog(labJob, "\n[ui] stop requested\n");
+        }
+        uiSendJson(res, 200, { ok: true });
+        return;
+      }
+      if (req.method === "GET" && u.pathname.indexOf("/report/") === 0) {
+        uiServeReportFile(res, state, u.pathname.slice(8));
+        return;
+      }
+      if (u.pathname === "/favicon.ico") { res.writeHead(204); res.end(); return; }
+      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("not found");
+    } catch (e) {
+      uiSendJson(res, 500, { ok: false, error: e.message });
+    }
+  });
+  const port = positiveIntOpt(opts.port, 18088);
+  server.listen(port, "127.0.0.1", function () {
+    log("local web dashboard started");
+    log("  ui      : http://127.0.0.1:" + port + "/");
+    log("  state   : " + uiStateFile(opts));
     log("stop with Ctrl+C");
   });
   return server;
@@ -4970,6 +5293,17 @@ function selfTest(opts) {
     check("release-zip writes valid zip signature", exists(zipPath) && zipSig === "504b0304", zipSig);
     const relManifest = JSON.parse(readUtf8(path.join(relDir, "airgap_release_manifest.json")));
     check("release manifest includes rulepack files", relManifest.files.some(function (f) { return f.path === "rules/public-defaults.json"; }), JSON.stringify(relManifest.files.map(function (f) { return f.path; })));
+    const uiHtml = dashboardUiHtml();
+    check("ui dashboard contains run API and report link surface",
+      uiHtml.indexOf("/api/run") >= 0 && uiHtml.indexOf("/api/state") >= 0 && uiHtml.indexOf("기존 산출물") >= 0 && uiHtml.indexOf("Local Lab") >= 0,
+      "");
+    const uiArgs = uiBuildArgs("autofix", normalizedUiState({ source: src, target: t1, report: r1 }, defaultUiState(mk({}))), false);
+    check("ui autofix command includes target/report/source",
+      uiArgs.indexOf("--source") >= 0 && uiArgs.indexOf("--target") >= 0 && uiArgs.indexOf("--report") >= 0,
+      uiArgs.join(" "));
+    check("ui child runner uses wrapper script",
+      path.basename(uiRunnerScript()) === "run-jquery35-v5.js" && exists(uiRunnerScript()),
+      uiRunnerScript());
   } catch (e) {
     check("no unexpected exception", false, e.stack || e.message);
   }
@@ -4997,6 +5331,10 @@ function run(argv) {
   try {
     if (mode === "self-test") {
       process.exitCode = selfTest(opts);
+      return;
+    }
+    if (mode === "ui") {
+      startDashboardUi(opts);
       return;
     }
     if (mode === "release-zip") {

@@ -17,18 +17,22 @@
 - **공개 배포용 rulepack** — 웹루트 후보, Probe 삽입 힌트, 벤더 권고, mock 기본 응답을 `rules/*.json`으로 분리. 배포처마다 JS 코드를 고치지 않고 룰팩만 바꿔 튜닝합니다.
 - **Java/Spring 정적 증거** — Spring을 띄우지 않고 `@RequestMapping` 계열과 XML 설정을 읽어 `ajaxToServerMap.csv`, `serverEndpoints.csv`, `hermes_server_evidence.json`을 생성하고 mock route에 컨트롤러 힌트를 붙입니다.
 - **폐쇄망 배포 산출물** — `airgap_manifest.json/txt`로 무의존/무통신 증빙을 남기고, `--mode release-zip`으로 공개 배포용 ZIP을 생성합니다.
-- **자체 검증 내장** — `--mode self-test`가 임시 샘플 프로젝트를 만들어 전체 사이클(92개 체크)을 검증. v5.4.0은 jQuery 3.5.1 안착 기준에 공개 배포용 rulepack/airgap/release 흐름을 추가합니다.
+- **로컬 웹 콘솔** — `실행0_웹대시보드.bat` 또는 `--mode ui`로 브라우저에서 plan/autofix/patch/probe/review/verify/release를 실행하고 기존 보고서 HTML을 바로 엽니다.
+- **자체 검증 내장** — `--mode self-test`가 임시 샘플 프로젝트를 만들어 전체 사이클(95개 체크)을 검증. v5.5.0은 jQuery 3.5.1 안착 기준에 로컬 웹 콘솔을 추가합니다.
 
 ## 빠른 시작
 
 ```bat
 node run-jquery35-v5.js --mode self-test
 
+node run-jquery35-v5.js --mode ui --port 18088
+
 node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode plan
 ```
 
-이후 `report\index.html` 대시보드를 열어 현황을 확인하고, `README_FIRST.txt`의 6단계 순서(분석 → 자동수정 → jQuery 교체 → Probe → Lab → verify-clean)를 따라가면 됩니다.
-Windows 사용자는 동봉된 `실행1_분석만.bat` ~ `실행9_배포ZIP생성.bat`의 상단 경로만 수정해 실행하세요.
+브라우저 콘솔은 `http://127.0.0.1:18088/` 에서 열립니다. 여기서 경로를 저장하고 버튼으로 실행하면 됩니다.
+명령어 방식이 편하면 `report\index.html` 대시보드를 열어 현황을 확인하고, `README_FIRST.txt`의 순서(분석 → 자동수정 → jQuery 교체 → Probe → Lab → verify-clean)를 따라가면 됩니다.
+Windows 사용자는 동봉된 `실행0_웹대시보드.bat` ~ `실행9_배포ZIP생성.bat`의 상단 경로만 수정해 실행하세요.
 
 공개 배포/다른 현장 적용 시에는 `project-profile.public.sample.json`을 복사해 `project-profile.json`으로 만들고, 필요하면 `rules/public-defaults.json`, `rules/vendor-compat.json`, `rules/mock-defaults.json`만 수정하세요.
 

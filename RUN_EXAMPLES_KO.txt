@@ -4,6 +4,12 @@ jquery35-local-agent v5 - 명령 예시 모음
 도움말:
   node run-jquery35-v5.js --help
 
+0) 웹 대시보드 UI (PowerShell 명령을 매번 치지 않고 브라우저에서 실행):
+  node run-jquery35-v5.js --mode ui --port 18088
+  접속: http://127.0.0.1:18088/
+  Windows: 실행0_웹대시보드.bat
+  기능: 경로 저장, plan/autofix/patch/probe/review/verify/release 실행, Local Lab 시작/중지, 기존 report HTML 열기
+
 1) 분석만 (원본/TO-BE 아무것도 수정 안 함):
   node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode plan
 
@@ -47,9 +53,9 @@ jquery35-local-agent v5 - 명령 예시 모음
 
 11) 공개 배포용 ZIP 생성 (source 불필요):
   node run-jquery35-v5.js --report ".\release" --mode release-zip
-  -> .\release\jquery35-local-agent-v5.4.0-public.zip
+  -> .\release\jquery35-local-agent-v5.5.0-public.zip
 
-12) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 92개 체크):
+12) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 95개 체크):
   node run-jquery35-v5.js --mode self-test
 
 유용한 옵션:
