@@ -32,12 +32,16 @@ jquery35-local-agent v5 - 명령 예시 모음
 8) assistant_packet만 재생성:
   node run-jquery35-v5.js --source "C:\work\legacy-app" --report "C:\work\jquery35_report_v5" --mode packet
 
-9) AI 리뷰팩 생성 (스무고개 반복 학습용, 7절 참고. 같은 --report 폴더로 재실행하면 라운드가 누적됨):
+9) AI 리뷰팩 + Hermes 로컬 검수팩 생성 (스무고개 반복 학습용, 7절 참고. 같은 --report 폴더로 재실행하면 라운드가 누적됨):
   node run-jquery35-v5.js --source "C:\work\legacy-app" --report "C:\work\jquery35_report_v5" --mode review-pack
   -> report\ai_review_pack.txt 를 외부 AI에게 붙여넣고, 답변 JSON을 project-profile.json의
      learnedWrappers/learnedFindings 배열에 병합한 뒤 같은 명령을 다시 실행
+  -> report\hermes_test_plan.md / hermes_review_matrix.csv 로 외부 AI 답변을 로컬에서 검수
 
-10) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 70개 체크):
+9-1) 외부 AI 질문보다 로컬 검수팩 의도를 강조하고 싶을 때:
+  node run-jquery35-v5.js --source "C:\work\legacy-app" --report "C:\work\jquery35_report_v5" --mode hermes-pack
+
+10) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 78개 체크):
   node run-jquery35-v5.js --mode self-test
 
 유용한 옵션:

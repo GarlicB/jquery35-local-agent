@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.3.3";
+const TOOL_VERSION = "5.3.4";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -17,7 +17,7 @@ const PROBE_MARKER = "JQUERY35_RUNTIME_PROBE";
 const PAGE_EXTS = [".jsp", ".jspx", ".html", ".htm", ".tag", ".tagx", ".inc", ".xhtml"];
 const TEXT_EXTS = PAGE_EXTS.concat([".js", ".css"]);
 const EXCLUDE_DIRS = Object.assign(Object.create(null), { ".git": 1, ".svn": 1, ".hg": 1, "node_modules": 1, "target": 1, "build": 1, "dist": 1, ".idea": 1, ".settings": 1 });
-const MODES = ["plan", "autofix", "patch-jquery", "probe", "lab", "verify-clean", "pr-report", "packet", "review-pack", "self-test"];
+const MODES = ["plan", "autofix", "patch-jquery", "probe", "lab", "verify-clean", "pr-report", "packet", "review-pack", "hermes-pack", "self-test"];
 
 const DEFAULT_PATH_VARS = {
   "${js}": "/js",
@@ -502,6 +502,8 @@ function helpText() {
     "  review-pack   analyze + write ai_review_pack.txt/json: a bounded, redacted",
     "                questionnaire over the most ambiguous/high-leverage code spots,",
     "                meant to be copy-pasted to an external AI and iterated on",
+    "  hermes-pack   review-pack + local verification plan/matrix/profile templates",
+    "                for air-gapped review without network calls",
     "  self-test     build a sample project in temp dir and validate the tool end-to-end",
     "",
     "Options:",
@@ -2994,7 +2996,7 @@ function writeIndexHtml(model) {
       model.reviewCases.slice(0, 20).map(function (g) {
         return [g.caseId, g.kind === "FN" ? "함수" : "패턴", g.name, g.fanout, g.count, g.findings[0].priority, trunc(g.question, 60)];
       })));
-    parts.push('<div class="small">--mode review-pack 실행 시 ai_review_pack.txt/json이 생성됩니다. 코드 원문 없이 함수명/앞뒤 몇 줄만 담겨 외부 AI에게 전달 가능하며, 답변을 project-profile.json에 병합하면 다음 라운드에 자동 반영됩니다.</div>');
+    parts.push('<div class="small">--mode review-pack 또는 hermes-pack 실행 시 ai_review_pack.txt/json과 ' + reportLink("hermes_test_plan.md", "hermes_test_plan.md") + " / " + reportLink("hermes_review_matrix.csv", "hermes_review_matrix.csv") + '가 생성됩니다. 코드 원문 없이 함수명/앞뒤 몇 줄만 담겨 외부 AI에게 전달 가능하며, 로컬 검수 결과를 project-profile.json에 병합하면 다음 라운드에 분류가 반영됩니다.</div>');
   }
   parts.push("<h2>다음 액션</h2><ol>");
   recommendedActions(model).forEach(function (a) { parts.push("<li>" + htmlEsc(a) + "</li>"); });
@@ -3311,6 +3313,222 @@ function writeReviewProgress(model) {
   writeUtf8(targetFile, [headerLine].concat(rows).join("\r\n") + "\r\n", true);
 }
 
+const HERMES_RECIPES = Object.assign(Object.create(null), {
+  "bool-attr-variable": {
+    hypothesis: "boolean attr 변수값 도메인을 확인하면 .prop(name, booleanExpr) 전환 가능 여부를 로컬에서 확정할 수 있습니다.",
+    staticEvidence: "함수 정의부와 전체 호출부에서 해당 인자가 true/false, Y/N, 1/0 중 하나로만 들어오는지 확인합니다.",
+    runtimeTest: "대표 화면에서 버튼/체크박스/셀렉트의 enabled, checked, selected, readonly 상태가 기존과 같은지 클릭 전/후로 확인합니다.",
+    passWhen: "모든 호출부 값 도메인이 하나로 일치하고 화면 상태가 기존과 같으면 AutoInferred 후보입니다.",
+    failWhen: "문자열 'false', 빈 문자열, 혼합 타입, 서버 문자열이 섞이면 수동 조치로 남깁니다.",
+    profileAction: "project-profile 학습값으로 자동수정을 트리거하지 말고, 코드 패치 또는 향후 로컬 룰팩 후보로 기록합니다.",
+    safeAutomation: "medium-after-domain-check",
+    decisions: ["manual", "review", "ignored"]
+  },
+  "dom-sink": {
+    hypothesis: "DOM sink 인자가 서버 응답/사용자 입력이면 XSS 검토 대상이고, 고정 literal 또는 escape된 값이면 낮출 수 있습니다.",
+    staticEvidence: "sink 인자의 변수 정의, AJAX success 콜백 파라미터, JSP EL/Request 값 연결 여부를 추적합니다.",
+    runtimeTest: "Lab/Probe에서 대표 응답에 '<b>HERMES</b>' 같은 무해 태그 문자열을 넣고 HTML로 해석되는지 확인합니다.",
+    passWhen: "HTML이 필요 없거나 escape/safe wrapper를 거친 값이면 static-safe 또는 safeWrapper 학습 후보입니다.",
+    failWhen: "서버/사용자 값이 .html/.append/replaceWith로 직접 들어가면 XssHigh로 유지합니다.",
+    profileAction: "공통 렌더러 함수면 learnedWrappers(domSinkArg/safeWrapper), 단일 패턴이면 learnedFindings로 기록합니다.",
+    safeAutomation: "no-code-change",
+    roles: ["domSinkArg", "safeWrapper"],
+    decisions: ["xss-high", "review", "static-safe", "ignored"]
+  },
+  "wrapper-dom-sink": {
+    hypothesis: "회사 공통 래퍼가 내부적으로 DOM sink인지 확인하면 호출부 전체의 위험도를 전파할 수 있습니다.",
+    staticEvidence: "래퍼 함수 내부에서 .html/.append/.before/.after/replaceWith/parseHTML을 호출하는지 확인합니다.",
+    runtimeTest: "래퍼 호출 화면에서 무해 태그 문자열이 DOM으로 해석되는지 Probe/Lab으로 확인합니다.",
+    passWhen: "래퍼가 escape를 보장하면 safeWrapper, DOM에 HTML로 넣으면 domSinkArg입니다.",
+    failWhen: "래퍼 내부 구현을 찾을 수 없거나 호출부별 의미가 다르면 Review로 유지합니다.",
+    profileAction: "learnedWrappers에 role과 param index를 채워 다음 라운드에 전파합니다.",
+    safeAutomation: "classification-only",
+    roles: ["domSinkArg", "safeWrapper"],
+    decisions: ["xss-high", "review", "static-safe"]
+  },
+  "jqxhr-shorthand": {
+    hypothesis: ".success/.error/.complete가 jqXHR 체인인지, $.error 같은 일반 함수인지 구분해야 합니다.",
+    staticEvidence: "수신자가 $.ajax(...) 반환값인지, 변수에 담긴 jqXHR인지, 또는 $.error 전역 유틸인지 확인합니다.",
+    runtimeTest: "AJAX 성공/실패 케이스에서 done/fail/always 전환 후 콜백 인자 순서와 화면 메시지가 같은지 확인합니다.",
+    passWhen: "jqXHR 체인이면 done/fail/always 전환, 일반 $.error 유틸이면 jQuery 3.5.1 필수 이슈에서 제외합니다.",
+    failWhen: "콜백 인자 의미를 모르면 Manual로 유지합니다.",
+    profileAction: "반복 오탐이면 learnedFindings decision=ignored/review로 분류만 보정합니다.",
+    safeAutomation: "manual-required",
+    roles: ["ajaxSuccessJson"],
+    decisions: ["manual", "review", "ignored"]
+  },
+  "bind-to-on": {
+    hypothesis: "jQuery 객체의 .bind는 .on으로 바꿀 수 있지만, 벤더/플러그인 내부는 직접 수정하지 않는 편이 안전합니다.",
+    staticEvidence: "수신자 체인이 $/jQuery인지, 파일이 app 코드인지 vendor 코드인지 확인합니다.",
+    runtimeTest: "이벤트가 중복 바인딩되지 않고 클릭/키보드/submit 동작이 기존과 같은지 확인합니다.",
+    passWhen: "app 코드면 AutoFixed 후보, vendor면 VendorReview로 유지합니다.",
+    failWhen: "Function.prototype.bind 또는 플러그인 내부 이벤트라면 자동수정하지 않습니다.",
+    profileAction: "반복 vendor 오탐이면 vendorPatterns 또는 learnedFindings로 분류를 낮춥니다.",
+    safeAutomation: "high-for-app-low-for-vendor",
+    decisions: ["vendor-review", "review", "ignored"]
+  },
+  "unbind-to-off": {
+    hypothesis: "jQuery 객체의 .unbind는 .off로 바꿀 수 있지만, 벤더/플러그인 내부는 직접 수정하지 않는 편이 안전합니다.",
+    staticEvidence: "수신자 체인이 $/jQuery인지, 파일이 app 코드인지 vendor 코드인지 확인합니다.",
+    runtimeTest: "이벤트 해제 이후 중복 실행/미실행이 기존과 같은지 확인합니다.",
+    passWhen: "app 코드면 AutoFixed 후보, vendor면 VendorReview로 유지합니다.",
+    failWhen: "플러그인 내부 상태 저장과 결합되어 있으면 벤더 호환성 테스트로 넘깁니다.",
+    profileAction: "반복 vendor 오탐이면 vendorPatterns 또는 learnedFindings로 분류를 낮춥니다.",
+    safeAutomation: "high-for-app-low-for-vendor",
+    decisions: ["vendor-review", "review", "ignored"]
+  },
+  "_default": {
+    hypothesis: "현재 정적분석만으로는 로컬 확정 근거가 부족한 후보입니다.",
+    staticEvidence: "파일 위치, 함수명, 호출부 fanout, 주변 코드 의도를 확인합니다.",
+    runtimeTest: "대표 화면에서 해당 함수가 실행되는 업무 플로우를 한 번 수행하고 JS error/JQMIGRATE warning을 기록합니다.",
+    passWhen: "동작 의도와 값 출처가 설명 가능하면 learnedFindings로 분류만 보정합니다.",
+    failWhen: "의도/값 출처를 모르면 Review 또는 Manual로 유지합니다.",
+    profileAction: "learnedFindings에 decision과 notes를 남기되 자동수정은 트리거하지 않습니다.",
+    safeAutomation: "classification-only",
+    decisions: ["review", "manual", "ignored"]
+  }
+});
+
+function hermesRecipe(category) {
+  return HERMES_RECIPES[category] || HERMES_RECIPES["_default"];
+}
+
+function hermesCaseRecord(g, index) {
+  const cat = g.topCategories[0] || "unknown";
+  const recipe = hermesRecipe(cat);
+  return {
+    no: index + 1,
+    caseId: g.caseId,
+    kind: g.kind,
+    name: g.name,
+    fanout: g.fanout || 0,
+    occurrences: g.count,
+    category: cat,
+    priority: g.findings[0].priority,
+    confidence: g.findings[0].confidence,
+    locations: g.sampleLocationsShort,
+    question: g.shortQuestion,
+    hypothesis: recipe.hypothesis,
+    staticEvidence: recipe.staticEvidence,
+    runtimeTest: recipe.runtimeTest,
+    passWhen: recipe.passWhen,
+    failWhen: recipe.failWhen,
+    profileAction: recipe.profileAction,
+    safeAutomation: recipe.safeAutomation,
+    roles: (recipe.roles || []).join("|"),
+    decisions: (recipe.decisions || []).join("|")
+  };
+}
+
+function hermesProfileTemplate(g, rec) {
+  const recipe = hermesRecipe(rec.category);
+  const tpl = {
+    caseId: rec.caseId,
+    name: rec.name,
+    kind: rec.kind,
+    category: rec.category,
+    fillAfterLocalTest: true,
+    evidenceToRecord: ["staticEvidence", "runtimeTestResult", "passOrFailReason"],
+    allowedDecisions: recipe.decisions || ["review", "manual", "ignored"],
+    learnedFindingTemplate: {
+      caseId: rec.caseId,
+      name: rec.name,
+      decision: (recipe.decisions && recipe.decisions[0]) || "review",
+      notes: "fill after Hermes local verification"
+    }
+  };
+  if (rec.kind === "FN" && recipe.roles && recipe.roles.length > 0) {
+    tpl.allowedRoles = recipe.roles;
+    tpl.learnedWrapperTemplate = {
+      caseId: rec.caseId,
+      name: rec.name,
+      role: recipe.roles[0],
+      roleOptions: recipe.roles,
+      calleeParamIndex: null,
+      sinkParamIndex: 0,
+      notes: "fill exact role/index after local verification"
+    };
+  }
+  return tpl;
+}
+
+function writeHermesLocalPack(model) {
+  const R = model.reportRoot;
+  ensureDir(R);
+  const records = model.reviewCases.map(hermesCaseRecord);
+  writeCsv(path.join(R, "hermes_review_matrix.csv"),
+    ["No", "CaseId", "Kind", "Name", "FanOut", "Occurrences", "Category", "Priority", "Confidence", "Locations", "Question", "Hypothesis", "StaticEvidence", "RuntimeTest", "PassWhen", "FailWhen", "ProfileAction", "SafeAutomation", "AllowedRoles", "AllowedDecisions"],
+    records.map(function (r) {
+      return [r.no, r.caseId, r.kind, r.name, r.fanout, r.occurrences, r.category, r.priority, r.confidence, r.locations, r.question, r.hypothesis, r.staticEvidence, r.runtimeTest, r.passWhen, r.failWhen, r.profileAction, r.safeAutomation, r.roles, r.decisions];
+    }));
+
+  const M = [];
+  M.push("# Hermes 로컬 검수팩");
+  M.push("");
+  M.push("생성: " + TOOL_NAME + " v" + TOOL_VERSION + " / round " + model.reviewRound);
+  M.push("");
+  M.push("## 목적");
+  M.push("- 외부 AI에게 묻기 전에 로컬에서 확인할 근거와 테스트를 정리합니다.");
+  M.push("- 외부 AI 답변을 받은 뒤에도 같은 기준으로 검수해서 project-profile.json에 넣을지 결정합니다.");
+  M.push("- 이 파일은 코드 자동수정을 만들지 않습니다. learnedWrappers/learnedFindings도 분류 보정만 수행합니다.");
+  M.push("");
+  M.push("## 사용 순서");
+  M.push("1. hermes_review_matrix.csv에서 CaseId별 확인 항목을 봅니다.");
+  M.push("2. StaticEvidence 항목을 소스에서 확인하고, 필요하면 RuntimeTest를 Lab/Probe 화면에서 수행합니다.");
+  M.push("3. 확인 결과가 충분하면 hermes_profile_patch.sample.json의 해당 template을 채워 project-profile.json으로 옮깁니다.");
+  M.push("4. 같은 --report 폴더로 review-pack 또는 hermes-pack을 다시 실행해 FocusQueue/Manual/Review 감소 여부를 확인합니다.");
+  M.push("");
+  M.push("## 요약");
+  M.push("- 전체 애매한 그룹: " + model.reviewCasesAll);
+  M.push("- 이번 검수팩 포함: " + records.length);
+  M.push("- FocusQueue: " + model.counters.FocusQueue + " / Manual: " + model.counters.Manual + " / Review: " + model.counters.Review + " / XssHigh: " + model.counters.XssHigh);
+  M.push("");
+  M.push("## Case별 로컬 테스트 설계");
+  records.forEach(function (r) {
+    M.push("");
+    M.push("### CASE " + r.no + " " + r.caseId + " " + r.name);
+    M.push("- 위치: " + r.locations);
+    M.push("- 유형: " + r.category + " / " + r.priority + " / fanout=" + r.fanout + " / occ=" + r.occurrences);
+    M.push("- 질문: " + r.question);
+    M.push("- 가설: " + r.hypothesis);
+    M.push("- 정적 확인: " + r.staticEvidence);
+    M.push("- 로컬 실행 테스트: " + r.runtimeTest);
+    M.push("- 통과 기준: " + r.passWhen);
+    M.push("- 실패 기준: " + r.failWhen);
+    M.push("- profile 반영: " + r.profileAction);
+  });
+  writeUtf8(path.join(R, "hermes_test_plan.md"), M.join("\n") + "\n", true);
+
+  const profilePatch = {
+    tool: TOOL_NAME,
+    version: TOOL_VERSION,
+    purpose: "Hermes local verification templates. Do not merge templates unchanged.",
+    doNotMergeUnedited: true,
+    howToUse: [
+      "Run local static/runtime checks described in hermes_test_plan.md.",
+      "Copy only verified learnedWrapperTemplate or learnedFindingTemplate into project-profile.json.",
+      "Never use this file to trigger code changes; learned entries only adjust classification."
+    ],
+    learnedWrappers: [],
+    learnedFindings: [],
+    templates: records.map(function (r, i) { return hermesProfileTemplate(model.reviewCases[i], r); })
+  };
+  writeUtf8(path.join(R, "hermes_profile_patch.sample.json"), JSON.stringify(profilePatch, null, 2) + "\n", false);
+
+  const localReport = {
+    tool: TOOL_NAME,
+    version: TOOL_VERSION,
+    round: model.reviewRound,
+    sourceFingerprint: sourceFingerprint(model),
+    totalAmbiguousGroups: model.reviewCasesAll,
+    casesInPack: records.length,
+    files: ["hermes_test_plan.md", "hermes_review_matrix.csv", "hermes_profile_patch.sample.json"],
+    cases: records
+  };
+  writeUtf8(path.join(R, "hermes_local_report.json"), JSON.stringify(localReport, null, 2) + "\n", false);
+  log("hermes local pack: " + records.length + " case(s) -> hermes_test_plan.md / hermes_review_matrix.csv");
+}
+
 function writeReviewPack(model) {
   writeReviewProgress(model);
   const R = model.reportRoot;
@@ -3362,6 +3580,7 @@ function writeReviewPack(model) {
     })
   };
   writeUtf8(path.join(R, "ai_review_pack.json"), JSON.stringify(jsonOut) + "\n", false);
+  writeHermesLocalPack(model);
   log("review pack: " + model.reviewCases.length + "/" + model.reviewCasesAll + " ambiguous groups (round " + model.reviewRound + ")");
 }
 
@@ -3879,11 +4098,21 @@ function selfTest(opts) {
     writeReviewPack(mR1);
     check("ai_review_pack.txt created", exists(path.join(rReview, "ai_review_pack.txt")), "");
     check("ai_review_pack.json created", exists(path.join(rReview, "ai_review_pack.json")), "");
+    check("hermes_test_plan.md created", exists(path.join(rReview, "hermes_test_plan.md")), "");
+    check("hermes_review_matrix.csv created", exists(path.join(rReview, "hermes_review_matrix.csv")), "");
+    check("hermes_profile_patch.sample.json created", exists(path.join(rReview, "hermes_profile_patch.sample.json")), "");
     const packTxt = readUtf8(path.join(rReview, "ai_review_pack.txt"));
     check("review pack has marker and at least one CASE", packTxt.indexOf("JQUERY35_AI_REVIEW_PACK") >= 0 && packTxt.indexOf("---- CASE 1/") >= 0, "");
     check("review pack excerpt redacts string literals", !/hi /.test(packTxt) && packTxt.indexOf("<STR:") >= 0, "");
     const packJson = JSON.parse(readUtf8(path.join(rReview, "ai_review_pack.json")));
     check("review pack json cases array non-empty", Array.isArray(packJson.cases) && packJson.cases.length > 0, "");
+    const hermesPlan = readUtf8(path.join(rReview, "hermes_test_plan.md"));
+    check("hermes plan has local verification criteria", hermesPlan.indexOf("Hermes 로컬 검수팩") >= 0 && hermesPlan.indexOf("통과 기준") >= 0 && hermesPlan.indexOf("로컬 실행 테스트") >= 0, "");
+    const hermesMatrix = readUtf8(path.join(rReview, "hermes_review_matrix.csv"));
+    check("hermes matrix has evidence/test columns", hermesMatrix.indexOf("StaticEvidence") >= 0 && hermesMatrix.indexOf("RuntimeTest") >= 0 && hermesMatrix.indexOf("AllowedDecisions") >= 0, "");
+    const hermesPatch = JSON.parse(readUtf8(path.join(rReview, "hermes_profile_patch.sample.json")));
+    check("hermes profile patch is template-only", hermesPatch.doNotMergeUnedited === true && Array.isArray(hermesPatch.templates) && hermesPatch.templates.length > 0 && hermesPatch.learnedWrappers.length === 0, "");
+    check("hermes wrapper template uses one concrete role", !hermesPatch.templates.some(function (t) { return t.learnedWrapperTemplate && /\|/.test(t.learnedWrapperTemplate.role); }), "");
     check("round counter starts at 1", mR1.reviewRound === 1, "got " + mR1.reviewRound);
 
     const mR2 = buildModel(mk({ source: src, report: rReview }), "review-pack");
@@ -3891,6 +4120,13 @@ function selfTest(opts) {
     writeAllReports(mR2, {});
     writeReviewPack(mR2);
     check("round counter increments on second run in same report dir", mR2.reviewRound === 2, "got " + mR2.reviewRound);
+
+    const rHermes = path.join(base, "report_hermes_pack");
+    const mHermes = buildModel(mk({ source: src, report: rHermes }), "hermes-pack");
+    analyze(mHermes);
+    writeAllReports(mHermes, {});
+    writeReviewPack(mHermes);
+    check("hermes-pack alias writes local pack", exists(path.join(rHermes, "hermes_test_plan.md")) && exists(path.join(rHermes, "ai_review_pack.txt")), "");
 
     const learnedCaseId = caseIdOf("FN", "renderCell");
     const overridePath = path.join(base, "learned-findings-profile.json");
@@ -3978,7 +4214,7 @@ function run(argv) {
       writePacket(model);
       writeChatSummary(model);
       log("packet written: " + path.join(model.reportRoot, "assistant_packet.txt"));
-    } else if (mode === "review-pack") {
+    } else if (mode === "review-pack" || mode === "hermes-pack") {
       writeAllReports(model, {});
       writeReviewPack(model);
     }
