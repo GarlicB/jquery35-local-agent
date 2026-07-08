@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.5.1";
+const TOOL_VERSION = "5.6.0";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -1064,6 +1064,7 @@ function scanRegionFindings(model, ctx, region) {
   while ((m = callRe.exec(masked)) !== null) {
     const name = m[1];
     const dotIdx = m.index;
+    const nameIdx = m.index + m[0].indexOf(name);
     const parenIdx = m.index + m[0].length - 1;
     const closeIdx = matchParen(masked, parenIdx);
     if (closeIdx < 0) continue;
@@ -1074,7 +1075,7 @@ function scanRegionFindings(model, ctx, region) {
     const recv = receiverInfo(masked, orig, dotIdx);
     const jq = isJqReceiver(recv);
     const callText = trunc((recv.text ? recv.text : "") + O(dotIdx, closeIdx + 1), 200);
-    const fIdx = abs(dotIdx);
+    const fIdx = abs(nameIdx);
 
     if (name === "bind" || name === "unbind") {
       if (recv.base === "}" ) continue;
@@ -1088,7 +1089,7 @@ function scanRegionFindings(model, ctx, region) {
           before: callText, after: "." + newName + "(...)",
           reason: "jQuery ." + name + "() deprecated, replaced with ." + newName + "()",
           commitGroup: "AUTO_SAFE",
-          editStart: fIdx, editEnd: abs(parenIdx), replacement: "." + newName
+          editStart: fIdx, editEnd: fIdx + name.length, replacement: newName
         });
       } else {
         addFinding(model, ctx, {
@@ -1113,7 +1114,7 @@ function scanRegionFindings(model, ctx, region) {
           before: callText, after: rep,
           reason: "." + name + "(selector,event,handler) rewritten to ." + newName + "(event,selector,handler)",
           commitGroup: "AUTO_SAFE",
-          editStart: fIdx, editEnd: abs(closeIdx) + 1, replacement: rep
+          editStart: fIdx, editEnd: abs(closeIdx) + 1, replacement: rep.slice(1)
         });
       } else {
         addFinding(model, ctx, {
@@ -1136,7 +1137,7 @@ function scanRegionFindings(model, ctx, region) {
           before: callText, after: ".length",
           reason: ".size() removed in jQuery 3.0",
           commitGroup: "AUTO_SAFE",
-          editStart: fIdx, editEnd: abs(closeIdx) + 1, replacement: ".length"
+          editStart: fIdx, editEnd: abs(closeIdx) + 1, replacement: "length"
         });
       } else if (args.length === 0) {
         addFinding(model, ctx, {
@@ -1157,7 +1158,7 @@ function scanRegionFindings(model, ctx, region) {
           before: callText, after: '.on("load", ...)',
           reason: "window load event shortcut removed in jQuery 3.0",
           commitGroup: "AUTO_SAFE",
-          editStart: fIdx, editEnd: abs(parenIdx) + 1, replacement: '.on("load", '
+          editStart: fIdx, editEnd: abs(parenIdx) + 1, replacement: 'on("load", '
         });
       } else if (jq && args.length >= 1 && !/^['"]/.test(args[0].masked) && recv.base !== "$" && recv.base !== "jQuery") {
         addFinding(model, ctx, {
@@ -1223,7 +1224,7 @@ function scanRegionFindings(model, ctx, region) {
           before: callText, after: ".addBack()",
           reason: ".andSelf() removed in jQuery 3.0",
           commitGroup: "AUTO_SAFE",
-          editStart: fIdx, editEnd: abs(closeIdx) + 1, replacement: ".addBack()"
+          editStart: fIdx, editEnd: abs(closeIdx) + 1, replacement: "addBack()"
         });
       }
       continue;
@@ -1429,7 +1430,7 @@ function handleAttr(model, ctx, p) {
       before: p.callText, after: rep,
       reason: "boolean attribute removal converted to .prop(name, false) for jQuery 3.x consistency",
       commitGroup: "AUTO_SAFE",
-      editStart: p.fIdx, editEnd: p.abs(p.closeIdx) + 1, replacement: rep
+      editStart: p.fIdx, editEnd: p.abs(p.closeIdx) + 1, replacement: rep.slice(1)
     });
     return;
   }
@@ -1453,6 +1454,7 @@ function handleAttr(model, ctx, p) {
   const vO = args[1].orig;
   const vM = args[1].masked;
   const mkProp = function (valExpr) { return '.prop("' + an + '", ' + valExpr + ")"; };
+  const mkPropTail = function (valExpr) { return 'prop("' + an + '", ' + valExpr + ")"; };
   const autoEdit = function (valExpr, why, prio) {
     addFinding(model, ctx, {
       idx: p.fIdx, category: prio === "AutoInferred" ? "bool-attr-variable" : "bool-attr-literal",
@@ -1460,7 +1462,7 @@ function handleAttr(model, ctx, p) {
       priority: prio || "AutoFixed", confidence: "High", action: "Changed",
       before: p.callText, after: mkProp(valExpr),
       reason: why, commitGroup: "AUTO_SAFE",
-      editStart: p.fIdx, editEnd: p.abs(p.closeIdx) + 1, replacement: mkProp(valExpr)
+      editStart: p.fIdx, editEnd: p.abs(p.closeIdx) + 1, replacement: mkPropTail(valExpr)
     });
   };
   if (/^(true|false)$/.test(vM)) { autoEdit(vM, "boolean literal moved from attr to prop"); return; }
@@ -1562,7 +1564,7 @@ function resolveAutoInferred(model) {
         f.commitGroup = "AUTO_SAFE";
         f.editStart = f.pending.editStart;
         f.editEnd = f.pending.editEnd;
-        f.replacement = '.prop("' + f.pending.attrName + '", ' + expr + ")";
+        f.replacement = 'prop("' + f.pending.attrName + '", ' + expr + ")";
       } else {
         f.priority = "Manual";
         f.action = "ReviewOnly";
@@ -2134,10 +2136,10 @@ function collectJavaAnnotationsAndMethods(text) {
       pending = [];
       continue;
     }
-    const sig = lines.slice(i, Math.min(lines.length, i + 6)).join(" ");
-    const methM = /\b(public|protected|private)\s+(?:static\s+)?[\w<>\[\],.?]+\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(([\s\S]*?)\)\s*(?:throws\s+[^{]+)?\{/.exec(sig);
+    const sig = lines.slice(i, Math.min(lines.length, i + 10)).join(" ");
+    const methM = /(?:^|[\s;])(?:(?:public|protected|private)\s+)?(?:static\s+)?(?:@[A-Za-z0-9_$.]+(?:\([^)]*\))?\s*)*(?:[\w$<>\[\],.?]+\s+)+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(([\s\S]*?)\)\s*(?:throws\s+[^{]+)?\{/.exec(sig);
     if (methM) {
-      items.push({ type: "method", name: methM[2], line: i + 1, signature: methM[0], annotations: pending.slice() });
+      items.push({ type: "method", name: methM[1], line: i + 1, signature: methM[0], annotations: pending.slice() });
       pending = [];
       continue;
     }
@@ -2357,10 +2359,10 @@ function analyzeSyntax(model) {
 }
 
 const VENDOR_RECOMMEND = {
-  "jquery-ui": "jQuery UI <= 1.12.1 has its OWN CVEs (CVE-2021-41182/41183/41184 datepicker XSS, CVE-2022-31160); security scanners flag it even after jQuery core upgrade - move to jQuery UI 1.13.2+ (supports jQuery 3.x), then test datepicker/dialog/button/tabs/autocomplete",
-  "jqgrid": "do not hand-edit; classic trirand jqGrid 4.x predates jQuery 3 - plan replacement with free-jqGrid 4.15.x or its maintained fork (jQuery 3.x support) or Guriddo jqGrid 5.5.4+ (commercial, official jQuery 3.5 support); until swapped, test rendering/paging/sort/search/inline edit/formatter/subgrid under Migrate and watch JQMIGRATE warnings from grid files",
-  "select2": "select2 4.0.8+ fixed jQuery 3.x compatibility (4.0.5 had focus/multiselect bugs under jQuery 3); 3.5.x line is unmaintained - test placeholder, ajax search, multiple select, initial value binding, or plan upgrade to 4.0.13",
-  "autoNumeric": "old autoNumeric 1.x reported working under jQuery 3.x; v4+ is jQuery-free standalone if replacement ever needed; test amount input, comma formatting, blur/focus, saved value, readonly/disabled",
+  "jquery-ui": "jQuery UI <= 1.12.1 has its OWN CVEs (CVE-2021-41182/41183/41184 datepicker XSS, CVE-2022-31160); for modern browsers prefer current 1.14.x, but 1.14 drops IE/Edge Legacy support, so Edge IE mode sites should test carefully and may need the last 1.13.x patch during transition; test datepicker/dialog/button/tabs/autocomplete",
+  "jqgrid": "do not hand-edit; classic trirand jqGrid 4.x predates jQuery 3 - plan replacement with free-jqGrid 4.15.x/maintained fork or Guriddo jqGrid 5.5.4+ (commercial, jQuery 3.5 support); until swapped, test rendering/paging/sort/search/inline edit/formatter/subgrid under Migrate and watch JQMIGRATE warnings from grid files",
+  "select2": "select2 3.5.x is legacy; 4.x is the supported jQuery-based line. If already on 4.0.13, treat as compatibility-test target; if on 4.0.5-era builds, watch known jQuery 3 focus/multiselect issues and test placeholder, ajax search, multiple select, initial value binding",
+  "autoNumeric": "old autoNumeric 1.x is a jQuery plugin and must be runtime-tested; autoNumeric v4 removed the jQuery dependency if replacement is allowed. Test amount input, comma formatting, blur/focus, saved value, readonly/disabled",
   "datepicker": "test open/close, locale, min/max date under jQuery 3.x",
   "bootstrap": "check bootstrap js version vs jQuery 3.x compatibility",
   "jquery-validate": "test form validation trigger/messages under jQuery 3.x",
@@ -3107,12 +3109,78 @@ function findingRow(f) {
 }
 const FINDING_HEADER = ["FilePath", "RelativePath", "FileName", "LineNumber", "Category", "Pattern", "Priority", "Confidence", "Action", "Before", "After", "Reason", "LibraryGuess", "ThirdParty", "CommitGroup"];
 
+function incCount(obj, key, by) {
+  obj[key] = (obj[key] || 0) + (by || 1);
+}
+function findingCategorySummary(model) {
+  const by = Object.create(null);
+  model.findings.forEach(function (f) {
+    const k = f.category || "unknown";
+    if (!by[k]) by[k] = { category: k, total: 0, critical: 0, xss: 0, manual: 0, review: 0, auto: 0, vendor: 0, staticLow: 0, files: Object.create(null) };
+    const r = by[k];
+    r.total++;
+    r.files[f.rel] = 1;
+    if (f.priority === "Critical") r.critical++;
+    else if (f.priority === "XssHigh") r.xss++;
+    else if (f.priority === "Manual") r.manual++;
+    else if (f.priority === "Review") r.review++;
+    else if (f.priority === "AutoFixed" || f.priority === "AutoInferred") r.auto++;
+    else if (f.priority === "VendorReview") r.vendor++;
+    else if (f.priority === "StaticHtmlLow") r.staticLow++;
+  });
+  return Object.keys(by).map(function (k) {
+    const r = by[k];
+    r.fileCount = Object.keys(r.files).length;
+    r.risk = r.critical * 100 + r.xss * 80 + r.manual * 60 + r.review * 40 + r.vendor * 25 + r.auto * 10;
+    return r;
+  }).sort(function (a, b) { return b.risk - a.risk || b.total - a.total || (a.category < b.category ? -1 : 1); });
+}
+function dirPrefixOf(rel, depth) {
+  const parts = toPosix(rel).split("/").filter(Boolean);
+  if (parts.length <= 1) return "(root)";
+  const dirs = parts.slice(0, Math.min(depth, parts.length - 1));
+  return dirs.length ? dirs.join("/") : "(root)";
+}
+function directoryRiskSummary(model) {
+  const by = Object.create(null);
+  [1, 2, 3, 4].forEach(function (depth) {
+    model.findings.forEach(function (f) {
+      const prefix = dirPrefixOf(f.rel, depth);
+      const k = depth + "|" + prefix;
+      if (!by[k]) by[k] = { depth: depth, prefix: prefix, total: 0, blockers: 0, critical: 0, xss: 0, manual: 0, review: 0, auto: 0, vendor: 0, files: Object.create(null), categories: Object.create(null) };
+      const r = by[k];
+      r.total++;
+      r.files[f.rel] = 1;
+      incCount(r.categories, f.category || "unknown", 1);
+      if (f.priority === "Critical") { r.critical++; r.blockers++; }
+      else if (f.priority === "XssHigh") { r.xss++; r.blockers++; }
+      else if (f.priority === "Manual") { r.manual++; r.blockers++; }
+      else if (f.priority === "Review") { r.review++; r.blockers++; }
+      else if (f.priority === "AutoFixed" || f.priority === "AutoInferred") r.auto++;
+      else if (f.priority === "VendorReview") { r.vendor++; r.blockers++; }
+    });
+  });
+  return Object.keys(by).map(function (k) {
+    const r = by[k];
+    r.fileCount = Object.keys(r.files).length;
+    r.topCategories = Object.keys(r.categories).sort(function (a, b) { return r.categories[b] - r.categories[a] || (a < b ? -1 : 1); }).slice(0, 5).map(function (c) { return c + ":" + r.categories[c]; }).join(" | ");
+    r.risk = r.critical * 100 + r.xss * 80 + r.manual * 60 + r.review * 40 + r.vendor * 25 + r.auto * 10;
+    return r;
+  }).sort(function (a, b) { return b.risk - a.risk || b.blockers - a.blockers || b.total - a.total || a.depth - b.depth || (a.prefix < b.prefix ? -1 : 1); });
+}
+
 function writeCsvReports(model) {
   const R = model.reportRoot;
   ensureDir(R);
   const cnt = model.counters;
   writeCsv(path.join(R, "summary.csv"), ["Key", "Value"], Object.keys(cnt).map(function (k) { return [k, cnt[k]]; }));
   writeCsv(path.join(R, "apiFindings.csv"), FINDING_HEADER, model.findings.map(findingRow));
+  writeCsv(path.join(R, "findingCategorySummary.csv"),
+    ["Category", "Total", "Critical", "XssHigh", "Manual", "Review", "Auto", "VendorReview", "StaticHtmlLow", "FileCount"],
+    findingCategorySummary(model).map(function (r) { return [r.category, r.total, r.critical, r.xss, r.manual, r.review, r.auto, r.vendor, r.staticLow, r.fileCount]; }));
+  writeCsv(path.join(R, "directoryRiskSummary.csv"),
+    ["Depth", "DirectoryPrefix", "TotalFindings", "Blockers", "Critical", "XssHigh", "Manual", "Review", "Auto", "VendorReview", "FileCount", "TopCategories"],
+    directoryRiskSummary(model).map(function (r) { return [r.depth, r.prefix, r.total, r.blockers, r.critical, r.xss, r.manual, r.review, r.auto, r.vendor, r.fileCount, r.topCategories]; }));
   writeCsv(path.join(R, "critical.csv"),
     ["FilePath", "RelativePath", "LineNumber", "OldSrc", "Version", "Recommendation"],
     model.oldCoreRefs.map(function (r) {
@@ -3224,6 +3292,10 @@ function writeXls(model) {
   sheets.push(xlsSheet("Critical", ["RelativePath", "Line", "OldSrc", "Version"],
     model.oldCoreRefs.map(function (r) { return [r.page, r.line, r.raw, r.meta.ver]; })));
   sheets.push(xlsSheet("ApiFindings", FINDING_HEADER.slice(1), model.findings.slice(0, 5000).map(function (f) { return findingRow(f).slice(1); })));
+  sheets.push(xlsSheet("CategorySummary", ["Category", "Total", "Critical", "XssHigh", "Manual", "Review", "Auto", "VendorReview", "Files"],
+    findingCategorySummary(model).slice(0, 2000).map(function (r) { return [r.category, r.total, r.critical, r.xss, r.manual, r.review, r.auto, r.vendor, r.fileCount]; })));
+  sheets.push(xlsSheet("DirectoryRisk", ["Depth", "DirectoryPrefix", "Total", "Blockers", "Critical", "XssHigh", "Manual", "Review", "Auto", "Vendor", "Files", "TopCategories"],
+    directoryRiskSummary(model).slice(0, 2000).map(function (r) { return [r.depth, r.prefix, r.total, r.blockers, r.critical, r.xss, r.manual, r.review, r.auto, r.vendor, r.fileCount, r.topCategories]; })));
   sheets.push(xlsSheet("JspPages", ["PagePath", "EffScripts", "CoreCount", "CoreVer", "OldCore", "Migrate", "MigrateAfter"],
     model.pages.slice(0, 2000).map(function (p) { return [p.rel, p.effectiveScripts, p.coreCount, p.coreVer, p.oldCore ? "Y" : "N", p.hasMigrate ? "Y" : "N", p.migrateAfter]; })));
   sheets.push(xlsSheet("PluginInventory", ["RelativePath", "Library", "Version", "RiskLevel", "Recommendation"],
@@ -3247,13 +3319,13 @@ function kpiCard(label, value, color) {
 function reportLink(file, label) {
   return '<a href="' + htmlEsc(file) + '">' + htmlEsc(label || file) + "</a>";
 }
-function tableHtml(header, rows) {
+function tableHtml(header, rows, rawCells) {
   let h = '<div class="tableWrap"><table><thead><tr>';
   header.forEach(function (x) { h += "<th>" + htmlEsc(x) + "</th>"; });
   h += "</tr></thead><tbody>";
   rows.forEach(function (r) {
     h += "<tr>";
-    r.forEach(function (c) { h += "<td>" + htmlEsc(c) + "</td>"; });
+    r.forEach(function (c) { h += "<td>" + (rawCells && /^<div class="barCell">/.test(String(c)) ? String(c) : htmlEsc(c)) + "</td>"; });
     h += "</tr>";
   });
   return h + "</tbody></table></div>";
@@ -3515,6 +3587,27 @@ function buildScopeRows(model) {
   ];
   return rows;
 }
+function barCell(n, max) {
+  const v = parseInt(n, 10) || 0;
+  const pct = max > 0 ? Math.max(2, Math.round(v * 100 / max)) : 0;
+  return '<div class="barCell"><span style="width:' + pct + '%"></span><b>' + htmlEsc(v) + "</b></div>";
+}
+function categorySummaryHtml(model) {
+  const rows = findingCategorySummary(model).slice(0, 18);
+  const max = rows.reduce(function (m, r) { return Math.max(m, r.total); }, 0);
+  return tableHtml(["유형", "총건", "Critical", "XSS", "수동", "검토", "자동", "파일"],
+    rows.map(function (r) {
+      return [r.category, barCell(r.total, max), r.critical, r.xss, r.manual, r.review, r.auto, r.fileCount];
+    }), true);
+}
+function directorySummaryHtml(model) {
+  const rows = directoryRiskSummary(model).slice(0, 30);
+  const max = rows.reduce(function (m, r) { return Math.max(m, r.total); }, 0);
+  return tableHtml(["Depth", "경로 prefix", "총건", "차단", "Critical", "XSS", "수동/검토", "자동", "파일", "상위 유형"],
+    rows.map(function (r) {
+      return [r.depth, r.prefix, barCell(r.total, max), r.blockers, r.critical, r.xss, r.manual + r.review, r.auto, r.fileCount, r.topCategories];
+    }), true);
+}
 function writeIndexHtml(model) {
   const c = model.counters;
   const focusDetails = buildFocusDetails(model);
@@ -3523,7 +3616,7 @@ function writeIndexHtml(model) {
   const parts = [];
   parts.push("<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\"><title>jQuery 3.5 조치 보고서</title><style>");
   parts.push("*{box-sizing:border-box}body{font-family:'Malgun Gothic',AppleGothic,sans-serif;margin:0;background:#eef2f6;color:#202733}.shell{max-width:1440px;margin:0 auto;padding:24px}h1{font-size:22px;line-height:1.25;margin:0;color:#151b24}h2{font-size:15px;margin:24px 0 10px;color:#1f2937}.topbar{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:18px 20px;display:flex;justify-content:space-between;gap:20px;box-shadow:0 8px 22px rgba(31,41,55,.06)}.eyebrow{font-size:11px;font-weight:700;letter-spacing:.04em;color:#5b6677;text-transform:uppercase}.subtitle{margin-top:8px;font-size:12px;color:#5b6677;word-break:break-all}.metaPills{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;min-width:260px}.pill{border:1px solid #d7ddea;border-radius:999px;background:#f7f9fc;color:#344054;font-size:12px;padding:5px 9px;white-space:nowrap}");
-  parts.push(".cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}.card{background:#fff;border:1px solid #d8dee8;border-left:4px solid var(--accent);border-radius:8px;padding:11px 14px;min-width:0;box-shadow:0 4px 14px rgba(31,41,55,.04)}.card .v{font-size:24px;line-height:1.1;font-weight:800;color:#101828}.card .l{font-size:12px;color:#667085;margin-top:4px}a{color:#1a5fb4;text-decoration:none}a:hover{text-decoration:underline}.small{font-size:12px;color:#5b6677}.tableWrap,.queueTable{overflow:auto;border:1px solid #dfe5ef;border-radius:8px;background:#fff;margin-top:8px}table{border-collapse:collapse;background:#fff;font-size:12px;width:100%}th,td{border-bottom:1px solid #e6ebf2;padding:7px 9px;text-align:left;word-break:break-all;vertical-align:top}th{background:#f5f7fb;color:#344054;font-weight:700}tr:last-child td{border-bottom:0}.warn{color:#b26a00}.crit{color:#b00020;font-weight:bold}.ok{color:#1b5e20}");
+  parts.push(".cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}.card{background:#fff;border:1px solid #d8dee8;border-left:4px solid var(--accent);border-radius:8px;padding:11px 14px;min-width:0;box-shadow:0 4px 14px rgba(31,41,55,.04)}.card .v{font-size:24px;line-height:1.1;font-weight:800;color:#101828}.card .l{font-size:12px;color:#667085;margin-top:4px}a{color:#1a5fb4;text-decoration:none}a:hover{text-decoration:underline}.small{font-size:12px;color:#5b6677}.tableWrap,.queueTable{overflow:auto;border:1px solid #dfe5ef;border-radius:8px;background:#fff;margin-top:8px}table{border-collapse:collapse;background:#fff;font-size:12px;width:100%}th,td{border-bottom:1px solid #e6ebf2;padding:7px 9px;text-align:left;word-break:break-all;vertical-align:top}th{background:#f5f7fb;color:#344054;font-weight:700}tr:last-child td{border-bottom:0}.warn{color:#b26a00}.crit{color:#b00020;font-weight:bold}.ok{color:#1b5e20}.distGrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.barCell{position:relative;min-width:90px;background:#eef2f6;border-radius:6px;overflow:hidden;height:20px}.barCell span{position:absolute;left:0;top:0;bottom:0;background:#b7c6d9}.barCell b{position:relative;z-index:1;display:block;text-align:right;padding:2px 7px;color:#1f2937}");
   parts.push(".stageFocus{background:#fff;border:1px solid #d8dee8;border-left:4px solid #78909c;border-radius:8px;margin-top:12px;padding:14px;box-shadow:0 6px 18px rgba(31,41,55,.05)}.stageFocus.danger{border-left-color:#b42318}.stageFocus.warn{border-left-color:#b54708}.stageFocus.calm{border-left-color:#4e5f70}.stageHead{display:flex;align-items:center;justify-content:space-between;gap:12px}.stageHead b{font-size:16px;color:#1f2937}.stageHead span{margin-left:8px;font-size:11px;color:#5b6677;border:1px solid #d7ddea;border-radius:999px;padding:2px 8px;background:#f7f9fc}.stageCounts{display:flex;gap:8px;flex-shrink:0}.stageCounts div{min-width:58px;border:1px solid #dfe5ef;border-radius:8px;background:#f8fafc;padding:6px 8px;text-align:right}.stageCounts b{display:block;font-size:20px;line-height:1;color:#101828}.stageCounts span{display:block;margin:3px 0 0;border:0;background:transparent;padding:0;color:#667085}.stageBody{display:grid;grid-template-columns:minmax(260px,.42fr) minmax(0,1fr);gap:14px;margin-top:12px}.stagePlan{background:#f8fafc;border:1px solid #e3e8f0;border-radius:8px;padding:11px}.stageLine{font-size:12px;color:#5b6677;margin-top:9px}.stageLine:first-child{margin-top:0}.stageLine b,.stageFiles b{color:#344054}.stageFiles{font-size:12px;margin-top:10px;color:#5b6677}.stageQueue{min-width:0}.queueHint{margin-top:4px}.subHead{display:flex;justify-content:space-between;gap:10px;align-items:center;margin:10px 0 5px}.subHead b{font-size:13px;color:#344054}.subHead span{font-size:11px;color:#667085}.status{display:inline-block;border-radius:999px;border:1px solid #d7ddea;padding:2px 7px;font-size:11px;white-space:nowrap}.status.changed{border-color:#7a2e0e;background:#fff4ed;color:#b42318}.status.same{background:#f8fafc;color:#667085}.status.missing{background:#fef7c3;color:#93370d}.emptyQueue{border:1px dashed #cfd7e3;border-radius:8px;background:#f8fafc;color:#667085;font-size:12px;padding:12px}");
   parts.push("details{background:#fff;border:1px solid #d8dee8;border-radius:8px;margin-top:14px;padding:10px 12px}summary{cursor:pointer;font-weight:800;color:#1f2937}.detailBlock{margin-top:10px}.filelink{border:0;background:transparent;color:#1a5fb4;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;padding:0}.modalBackdrop{position:fixed;inset:0;background:rgba(15,23,42,.58);z-index:1000;display:none}.modalBox{position:absolute;inset:4%;background:#fff;border:1px solid #344054;border-radius:8px;box-shadow:0 20px 60px rgba(15,23,42,.35);display:flex;flex-direction:column}.modalHead{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #d8dee8;background:#f5f7fb}.modalTitle{font-weight:800}.modalClose{border:1px solid #98a2b3;border-radius:6px;background:#fff;padding:5px 11px;cursor:pointer}.modalBody{padding:12px;overflow:auto}.detailGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.infoGrid{display:grid;grid-template-columns:130px 1fr;gap:5px 10px;font-size:12px;margin-bottom:12px}.infoGrid div:nth-child(odd){font-weight:800;color:#475467}.pane{border:1px solid #d8dee8;border-radius:8px;background:#fbfcfe;overflow:hidden}.pane h3{font-size:13px;margin:0;padding:7px 9px;background:#f3f6fa;border-bottom:1px solid #d8dee8}.codeLine{display:grid;grid-template-columns:46px 1fr;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap}.codeLine .ln{color:#667085;text-align:right;padding:0 8px;border-right:1px solid #e4e9f1;user-select:none}.codeLine .txt{padding:0 8px}.codeLine.hit{background:#fff4cf}.noteBox{font:12px Consolas,Menlo,monospace;padding:10px;color:#667085}@media(max-width:1100px){.cards{grid-template-columns:repeat(3,minmax(0,1fr))}.stageBody{grid-template-columns:1fr}.topbar{display:block}.metaPills{justify-content:flex-start;margin-top:12px}}@media(max-width:700px){.shell{padding:14px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.stageHead{align-items:flex-start}.stageCounts{display:grid;grid-template-columns:1fr 1fr}.detailGrid{grid-template-columns:1fr}.modalBox{inset:2%}}");
   parts.push("</style></head><body><main class=\"shell\">");
@@ -3536,6 +3629,7 @@ function writeIndexHtml(model) {
   parts.push(kpiCard("XSS 고위험", c.XssHigh, "#b00020"));
   parts.push(kpiCard("벤더 검토", c.VendorReview, "#546e7a"));
   parts.push("</div>");
+  parts.push("<h2>유형/경로 분포</h2><div class=\"distGrid\"><div><div class=\"small\">유형별 총건. 예: event-shortcut-load, bool-attr-variable 등</div>" + categorySummaryHtml(model) + '</div><div><div class="small">디렉토리 depth별 위험 분포. 어느 경로에 몰려 있는지 먼저 봅니다.</div>' + directorySummaryHtml(model) + "</div></div>");
   parts.push("<h2>단계별 조치 큐 (로드맵 + FocusQueue 상위 100건)</h2>");
   parts.push('<div class="small queueHint">1차 최소부터 확인하세요. 각 단계 안에서 목표와 멈춤 기준을 보고, 파일명을 클릭하면 AS-IS/TO-BE 주변 코드와 확인 포인트가 모달로 열립니다.</div>');
   parts.push(focusQueueHtml(model, focusDetails, autoDetails));
@@ -3570,7 +3664,7 @@ function writeIndexHtml(model) {
   parts.push("<h2>다음 액션</h2><ol>");
   recommendedActions(model).forEach(function (a) { parts.push("<li>" + htmlEsc(a) + "</li>"); });
   parts.push("</ol></div></details>");
-  parts.push('<div class="small">상세 데이터: apiFindings.csv / focusQueue.csv / jspPages.csv / pageScriptEffective.csv / ajaxToServerMap.csv / airgap_manifest.txt / jquery35_report.xls</div>');
+  parts.push('<div class="small">상세 데이터: apiFindings.csv / findingCategorySummary.csv / directoryRiskSummary.csv / focusQueue.csv / jspPages.csv / pageScriptEffective.csv / ajaxToServerMap.csv / airgap_manifest.txt / jquery35_report.xls</div>');
   parts.push("</main>");
   parts.push('<div id="focusDetailModal" class="modalBackdrop" onclick="if(event.target===this) closeFocusDetail();"><div class="modalBox"><div class="modalHead"><div id="focusModalTitle" class="modalTitle"></div><button type="button" class="modalClose" onclick="closeFocusDetail()">Close</button></div><div class="modalBody"><div id="focusModalInfo" class="infoGrid"></div><div class="detailGrid"><div class="pane"><h3>AS-IS</h3><div id="focusAsIs"></div></div><div class="pane"><h3>TO-BE</h3><div id="focusToBe"></div></div></div></div></div></div>');
   parts.push("<script>window.__JQ35_FOCUS_DETAILS__=" + scriptJson(modalDetails) + ";\n(function(){function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c];});}function block(sn){if(!sn||!sn.available){return '<div class=\"noteBox\">'+esc(sn&&sn.note?sn.note:'not available')+'</div>';}return sn.rows.map(function(r){return '<div class=\"codeLine '+(r.hit?'hit':'')+'\"><span class=\"ln\">'+esc(r.n)+'</span><span class=\"txt\">'+esc(r.text)+'</span></div>';}).join('');}window.openFocusDetail=function(i){var d=window.__JQ35_FOCUS_DETAILS__[i];if(!d)return;document.getElementById('focusModalTitle').textContent='#'+d.rank+' '+d.rel+':'+d.line;document.getElementById('focusModalInfo').innerHTML='<div>목록</div><div>'+esc(d.sourceKind)+'</div><div>TO-BE 상태</div><div>'+esc(d.toBeStatus)+'</div><div>유형</div><div>'+esc(d.category)+' / '+esc(d.priority)+' / '+esc(d.confidence)+'</div><div>패턴</div><div>'+esc(d.pattern)+'</div><div>왜 문제인가</div><div>'+esc(d.reason)+'</div><div>어떻게 바꾸나</div><div>'+esc(d.change)+'</div><div>확인할 것</div><div>'+esc(d.verify)+'</div>';document.getElementById('focusAsIs').innerHTML=block(d.asIs);document.getElementById('focusToBe').innerHTML=block(d.toBe);document.getElementById('focusDetailModal').style.display='block';};window.closeFocusDetail=function(){document.getElementById('focusDetailModal').style.display='none';};document.addEventListener('keydown',function(e){if(e.key==='Escape')closeFocusDetail();});})();</script>");
@@ -4432,7 +4526,7 @@ function writeAllReports(model, extra) {
   if (!model.opts["no-lab"]) writeMockFiles(model);
   if (extra && extra.pr) writePrReport(model);
   log("report written: " + model.reportRoot);
-  log("  - index.html (dashboard), summary.csv, apiFindings.csv, focusQueue.csv, jquery35_report.xls");
+  log("  - index.html (dashboard), summary.csv, apiFindings.csv, findingCategorySummary.csv, directoryRiskSummary.csv, focusQueue.csv, jquery35_report.xls");
   log("  - assistant_packet.txt / chat_summary.txt / airgap_manifest.txt");
 }
 const MIME = {
@@ -4487,6 +4581,12 @@ function labPageHtml(model, wcBase, rel) {
   let body = labTransformJsp(model, wcBase, rel, visited, 0);
   const banner = '<div style="position:fixed;top:0;left:0;right:0;z-index:999998;background:#263238;color:#fff;font:12px monospace;padding:4px 10px;">JQ35 LOCAL LAB (mock) - ' + htmlEsc(rel) + ' - JSP/JSTL/DB not executed. Final verification must run on Eclipse/Tomcat. <a href="/_pages" style="color:#8ecbff">[page list]</a></div><div style="height:26px"></div>';
   const probeTag = '<script src="/js/' + PROBE_FILE_NAME + '"></script>';
+  const baseTag = '<base href="/">';
+  if (/<head[^>]*>/i.test(body) && !/<base\b/i.test(body)) {
+    body = body.replace(/(<head[^>]*>)/i, "$1" + baseTag);
+  } else if (!/<head[^>]*>/i.test(body)) {
+    body = "<head>" + baseTag + "</head>" + body;
+  }
   if (/<body[^>]*>/i.test(body)) {
     body = body.replace(/(<body[^>]*>)/i, "$1" + banner);
   } else {
@@ -4688,6 +4788,45 @@ function normalizedUiState(input, prev) {
   return out;
 }
 
+function uiDerivedPaths(source) {
+  const src = String(source || "").trim();
+  if (!src) return {};
+  const root = path.resolve(src);
+  const parent = path.dirname(root);
+  const base = path.basename(root).replace(/[\\\/]+$/, "") || "legacy-app";
+  return {
+    target: path.join(parent, base + "_jquery35_tobe"),
+    report: path.join(parent, "jquery35_report_v5"),
+    verifySource: path.join(parent, base + "_jquery35_tobe")
+  };
+}
+
+function uiListDirectory(dirRaw) {
+  let dir = String(dirRaw || "").trim();
+  if (!dir) dir = os.homedir();
+  dir = path.resolve(dir);
+  if (!isDir(dir)) dir = path.dirname(dir);
+  const roots = [];
+  if (process.platform === "win32") {
+    for (let c = 65; c <= 90; c++) {
+      const drive = String.fromCharCode(c) + ":\\";
+      if (isDir(drive)) roots.push(drive);
+    }
+  } else {
+    roots.push("/");
+  }
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir).map(function (name) {
+      const abs = path.join(dir, name);
+      return { name: name, path: abs, dir: isDir(abs) };
+    }).filter(function (e) {
+      return e.dir && e.name.charAt(0) !== ".";
+    }).sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; }).slice(0, 300);
+  } catch (e) { }
+  return { path: dir, parent: path.dirname(dir), roots: roots, entries: entries, sep: path.sep };
+}
+
 function uiAddArg(args, name, val) {
   if (val !== undefined && val !== null && String(val) !== "") args.push("--" + name, String(val));
 }
@@ -4724,6 +4863,8 @@ function uiBuildArgs(mode, state, forLab) {
   if (forLab || mode === "lab") uiAddArg(args, "port", state.labPort || "18080");
   return args;
 }
+
+const UI_SEQUENCE_MODES = ["plan", "autofix", "patch-jquery", "hermes-pack", "pr-report", "airgap-manifest"];
 
 function uiRunnerScript() {
   return path.join(__dirname, "run-jquery35-v5.js");
@@ -4827,22 +4968,26 @@ function uiServeReportFile(res, state, relRaw) {
 function dashboardUiHtml() {
   const fields = ["source:원본 source", "target:TO-BE target", "report:보고서/report", "profile:project-profile.json", "rulepack:rulepack", "serverSource:Java source", "verifySource:verify-clean source", "labPort:Lab port", "maxReviewCases:review cases", "contextLines:context lines", "maxReviewLines:review lines"].map(function (p) {
     const a = p.split(":");
-    return "<div class=\"field\"><label>" + a[1] + "</label><input id=\"cfg_" + a[0] + "\"></div>";
+    const browse = /^(source|target|report|profile|rulepack|serverSource|verifySource)$/.test(a[0]);
+    return "<div class=\"field\"><label>" + a[1] + "</label><div class=\"pathRow\"><input id=\"cfg_" + a[0] + "\">" + (browse ? "<button type=\"button\" class=\"mini\" onclick=\"browsePath('" + a[0] + "')\">Browse</button>" : "") + "</div></div>";
   }).join("");
   return "<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\"><title>JQ35 Local Console</title><style>" +
-    "*{box-sizing:border-box}body{margin:0;background:#eef2f6;color:#1f2937;font-family:'Malgun Gothic',AppleGothic,Arial,sans-serif}.shell{max-width:1480px;margin:0 auto;padding:18px}.top{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:15px 17px;display:flex;justify-content:space-between;gap:14px}.eyebrow{font-size:11px;font-weight:800;color:#667085;text-transform:uppercase}.top h1{font-size:21px;margin:3px 0}.sub{font-size:12px;color:#667085;word-break:break-all}.pill{display:inline-block;border:1px solid #d7ddea;background:#f8fafc;border-radius:999px;padding:4px 9px;font-size:12px;margin:2px}.grid{display:grid;grid-template-columns:390px minmax(0,1fr);gap:14px;margin-top:14px}.panel{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:13px}.panel h2{font-size:14px;margin:0 0 10px}.form{display:grid;gap:8px}.field label{display:block;font-size:11px;font-weight:800;color:#475467;margin:0 0 3px}.field input{width:100%;border:1px solid #c8d1df;border-radius:6px;padding:8px 9px;font:12px Consolas,Menlo,monospace}.checks{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px}.checks label{border:1px solid #d8dee8;border-radius:6px;padding:7px;background:#f8fafc}.bar{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}button{border:1px solid #9aa7b8;background:#fff;border-radius:6px;padding:8px 11px;font-weight:800;font-size:12px;cursor:pointer}button.primary{background:#1d4ed8;color:#fff;border-color:#1d4ed8}button.danger{border-color:#b42318;color:#b42318}button:disabled{opacity:.48;cursor:not-allowed}.ops{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.op{border:1px solid #d8dee8;border-radius:8px;padding:11px;background:#fbfcfe;min-height:104px}.op b{display:block;font-size:13px}.op span{display:block;font-size:12px;color:#667085;margin:5px 0 10px;line-height:1.35}.op button{width:100%}.links{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.link{display:block;border:1px solid #d8dee8;background:#fbfcfe;border-radius:8px;padding:9px;text-decoration:none;color:#1f2937}.link b{display:block;font-size:12px}.link span{font-size:11px;color:#667085}.muted{font-size:12px;color:#667085}.ok{color:#166534}.bad{color:#b42318}.warn{color:#b54708}.log{height:360px;overflow:auto;background:#101828;color:#d1fadf;border-radius:8px;padding:10px;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap}.split{display:grid;grid-template-columns:1fr 1fr;gap:10px}@media(max-width:1120px){.grid,.split{grid-template-columns:1fr}.ops,.links{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:700px){.shell{padding:10px}.ops,.links{grid-template-columns:1fr}.top{display:block}}" +
+    "*{box-sizing:border-box}body{margin:0;background:#eef2f6;color:#1f2937;font-family:'Malgun Gothic',AppleGothic,Arial,sans-serif}.shell{max-width:1480px;margin:0 auto;padding:18px}.top{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:15px 17px;display:flex;justify-content:space-between;gap:14px}.eyebrow{font-size:11px;font-weight:800;color:#667085;text-transform:uppercase}.top h1{font-size:21px;margin:3px 0}.sub{font-size:12px;color:#667085;word-break:break-all}.pill{display:inline-block;border:1px solid #d7ddea;background:#f8fafc;border-radius:999px;padding:4px 9px;font-size:12px;margin:2px}.grid{display:grid;grid-template-columns:430px minmax(0,1fr);gap:14px;margin-top:14px}.panel{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:13px}.panel h2{font-size:14px;margin:0 0 10px}.form{display:grid;gap:8px}.field label{display:block;font-size:11px;font-weight:800;color:#475467;margin:0 0 3px}.pathRow{display:flex;gap:6px}.field input{width:100%;min-width:0;border:1px solid #c8d1df;border-radius:6px;padding:8px 9px;font:12px Consolas,Menlo,monospace}.mini{padding:7px 8px;flex:0 0 auto}.checks{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px}.checks label{border:1px solid #d8dee8;border-radius:6px;padding:7px;background:#f8fafc}.bar{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}button{border:1px solid #9aa7b8;background:#fff;border-radius:6px;padding:8px 11px;font-weight:800;font-size:12px;cursor:pointer}button.primary{background:#1d4ed8;color:#fff;border-color:#1d4ed8}button.danger{border-color:#b42318;color:#b42318}button:disabled{opacity:.48;cursor:not-allowed}.ops{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.op{border:1px solid #d8dee8;border-radius:8px;padding:11px;background:#fbfcfe;min-height:104px}.op b{display:block;font-size:13px}.op span{display:block;font-size:12px;color:#667085;margin:5px 0 10px;line-height:1.35}.op button{width:100%}.links{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.link{display:block;border:1px solid #d8dee8;background:#fbfcfe;border-radius:8px;padding:9px;text-decoration:none;color:#1f2937}.link b{display:block;font-size:12px}.link span{font-size:11px;color:#667085}.muted{font-size:12px;color:#667085}.ok{color:#166534}.bad{color:#b42318}.warn{color:#b54708}.log{height:360px;overflow:auto;background:#101828;color:#d1fadf;border-radius:8px;padding:10px;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap}.split{display:grid;grid-template-columns:1fr 1fr;gap:10px}.modal{position:fixed;inset:0;z-index:2000;background:rgba(15,23,42,.55);display:none}.modalIn{position:absolute;inset:6%;background:#fff;border-radius:8px;border:1px solid #344054;display:flex;flex-direction:column}.modalHead{padding:11px 13px;border-bottom:1px solid #d8dee8;background:#f5f7fb;display:flex;gap:8px;align-items:center}.modalHead input{flex:1;border:1px solid #c8d1df;border-radius:6px;padding:8px;font:12px Consolas,Menlo,monospace}.dirList{padding:10px;overflow:auto}.dirBtn{display:block;width:100%;text-align:left;margin:0 0 5px;border-color:#d8dee8;background:#fbfcfe}@media(max-width:1120px){.grid,.split{grid-template-columns:1fr}.ops,.links{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:700px){.shell{padding:10px}.ops,.links{grid-template-columns:1fr}.top{display:block}.pathRow{display:block}.mini{margin-top:4px;width:100%}}" +
     "</style></head><body><main class=\"shell\"><section class=\"top\"><div><div class=\"eyebrow\">jquery35-local-agent v" + htmlEsc(TOOL_VERSION) + "</div><h1>JQ35 Local Console</h1><div class=\"sub\" id=\"pathLine\"></div></div><div><span class=\"pill\" id=\"jobPill\">idle</span><span class=\"pill\" id=\"labPill\">lab off</span></div></section><div class=\"grid\"><aside class=\"panel\"><h2>경로</h2><div class=\"form\" id=\"cfgForm\">" + fields +
-    "<div class=\"checks\"><label><input type=\"checkbox\" id=\"cfg_migrateTrace\"> migrate trace</label><label><input type=\"checkbox\" id=\"cfg_noServerScan\"> no server scan</label></div><div class=\"bar\"><button class=\"primary\" onclick=\"saveConfig()\">Save</button><button onclick=\"refresh()\">Refresh</button></div></div></aside><section><div class=\"panel\"><h2>실행</h2><div class=\"ops\" id=\"ops\"></div></div><div class=\"panel\" style=\"margin-top:14px\"><h2>기존 산출물</h2><div id=\"links\" class=\"links\"></div></div><div class=\"panel\" style=\"margin-top:14px\"><div class=\"split\"><div><h2>작업 로그</h2></div><div class=\"bar\" style=\"justify-content:flex-end;margin-top:0\"><button onclick=\"refresh()\">Refresh</button><button class=\"danger\" onclick=\"stopLab()\">Stop Lab</button></div></div><pre id=\"log\" class=\"log\"></pre></div></section></div></main><script>" +
+    "<div class=\"checks\"><label><input type=\"checkbox\" id=\"cfg_migrateTrace\"> migrate trace</label><label><input type=\"checkbox\" id=\"cfg_noServerScan\"> no server scan</label></div><div class=\"bar\"><button class=\"primary\" onclick=\"saveConfig()\">Save</button><button onclick=\"derivePaths(true)\">Auto paths</button><button onclick=\"refresh()\">Refresh</button></div></div></aside><section><div class=\"panel\"><h2>실행</h2><div class=\"ops\" id=\"ops\"></div></div><div class=\"panel\" style=\"margin-top:14px\"><h2>기존 산출물</h2><div id=\"links\" class=\"links\"></div></div><div class=\"panel\" style=\"margin-top:14px\"><div class=\"split\"><div><h2>작업 로그</h2></div><div class=\"bar\" style=\"justify-content:flex-end;margin-top:0\"><button onclick=\"refresh()\">Refresh</button><button class=\"danger\" onclick=\"stopLab()\">Stop Lab</button></div></div><pre id=\"log\" class=\"log\"></pre></div></section></div></main><div id=\"pathModal\" class=\"modal\"><div class=\"modalIn\"><div class=\"modalHead\"><input id=\"browsePathInput\"><button onclick=\"loadBrowse(byId('browsePathInput').value)\">Open</button><button class=\"primary\" onclick=\"chooseBrowsePath()\">Use</button><button onclick=\"closeBrowse()\">Close</button></div><div id=\"dirList\" class=\"dirList\"></div></div></div><script>" +
     "var state=null,job=null,lab=null;var ops=[['plan','분석','index/report 생성'],['autofix','TO-BE 자동수정','target 폴더 필요'],['patch-jquery','jQuery 교체','3.5.1 + Migrate'],['probe','Probe 삽입','검증용 target'],['review-pack','AI 리뷰팩','질문지 + 검수팩'],['hermes-pack','Hermes 검수팩','로컬 시험장 포함'],['verify-clean','운영전 검증','target 또는 verify source'],['pr-report','PR/CI 보고서','체크리스트 생성'],['airgap-manifest','폐쇄망 증빙','manifest 생성'],['release-zip','배포 ZIP','작은 반입 파일']];" +
     "function byId(id){return document.getElementById(id)}function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c]})}function api(p,o){return fetch(p,Object.assign({headers:{'Content-Type':'application/json'}},o||{})).then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error(j.error||r.statusText);return j})})}" +
     "function fill(){if(!state)return;['source','target','report','profile','rulepack','serverSource','verifySource','labPort','maxReviewCases','contextLines','maxReviewLines'].forEach(function(k){byId('cfg_'+k).value=state[k]||''});byId('cfg_migrateTrace').checked=!!state.migrateTrace;byId('cfg_noServerScan').checked=!!state.noServerScan;byId('pathLine').textContent='source: '+(state.source||'-')+' / target: '+(state.target||'-')+' / report: '+(state.report||'-')}" +
-    "function renderOps(){var h='';ops.forEach(function(o){h+='<div class=\"op\"><b>'+esc(o[1])+'</b><span>'+esc(o[2])+'</span><button onclick=\"runMode(\\''+o[0]+'\\')\" '+(job&&job.running?'disabled':'')+'>Run</button></div>'});h+='<div class=\"op\"><b>Local Lab</b><span>mock 서버 별도 실행</span><button onclick=\"startLab()\" '+(lab&&lab.running?'disabled':'')+'>Start Lab</button></div>';byId('ops').innerHTML=h}" +
+    "function renderOps(){var h='<div class=\"op\"><b>One Button Pipeline</b><span>plan→autofix→patch→Hermes→PR→airgap 후 Lab 시작</span><button class=\"primary\" onclick=\"runPipeline()\" '+(job&&job.running?'disabled':'')+'>Run Pipeline</button></div>';ops.forEach(function(o){h+='<div class=\"op\"><b>'+esc(o[1])+'</b><span>'+esc(o[2])+'</span><button onclick=\"runMode(\\''+o[0]+'\\')\" '+(job&&job.running?'disabled':'')+'>Run</button></div>'});h+='<div class=\"op\"><b>Local Lab</b><span>mock 서버 별도 실행</span><button onclick=\"startLab()\" '+(lab&&lab.running?'disabled':'')+'>Start Lab</button></div>';byId('ops').innerHTML=h}" +
     "function renderLinks(files){var h='';(files||[]).forEach(function(f){h+='<a class=\"link\" target=\"_blank\" href=\"'+esc(f.href)+'\"><b>'+esc(f.label)+'</b><span>'+esc(f.file)+' · '+Math.ceil((f.size||0)/1024)+'KB</span></a>'});byId('links').innerHTML=h||'<div class=\"muted\">생성된 report 파일이 없습니다.</div>'}" +
     "function renderStatus(){var jp=byId('jobPill');if(job&&job.running){jp.textContent='running '+job.mode;jp.className='pill warn'}else if(job){jp.textContent='last '+job.mode+' exit '+job.exitCode;jp.className='pill '+(job.exitCode===0?'ok':'bad')}else{jp.textContent='idle';jp.className='pill'}var lp=byId('labPill');if(lab&&lab.running){lp.innerHTML='<a target=\"_blank\" href=\"http://localhost:'+esc(state.labPort||'18080')+'/_pages\">lab '+esc(state.labPort||'18080')+'</a>';lp.className='pill ok'}else{lp.textContent='lab off';lp.className='pill'}byId('log').textContent=job?job.log:'';renderOps()}" +
     "function collect(){var o={};['source','target','report','profile','rulepack','serverSource','verifySource','labPort','maxReviewCases','contextLines','maxReviewLines'].forEach(function(k){o[k]=byId('cfg_'+k).value});o.migrateTrace=byId('cfg_migrateTrace').checked;o.noServerScan=byId('cfg_noServerScan').checked;return o}" +
     "function saveConfig(){return api('/api/config',{method:'POST',body:JSON.stringify(collect())}).then(function(d){state=d.state;fill();return d})}" +
+    "function derivePaths(force){var src=byId('cfg_source').value;if(!src)return Promise.resolve();return api('/api/default-paths',{method:'POST',body:JSON.stringify({source:src})}).then(function(d){['target','report','verifySource'].forEach(function(k){if(force||!byId('cfg_'+k).value)byId('cfg_'+k).value=d[k]||byId('cfg_'+k).value});return saveConfig()})}" +
     "function runMode(m){saveConfig().then(function(){return api('/api/run',{method:'POST',body:JSON.stringify({mode:m})})}).then(function(){refresh()}).catch(function(e){alert(e.message)})}" +
+    "function runPipeline(){saveConfig().then(function(){return api('/api/run-sequence',{method:'POST',body:'{}'})}).then(function(){refresh()}).catch(function(e){alert(e.message)})}" +
     "function startLab(){saveConfig().then(function(){return api('/api/lab/start',{method:'POST',body:'{}'})}).then(function(){refresh()}).catch(function(e){alert(e.message)})}function stopLab(){api('/api/lab/stop',{method:'POST',body:'{}'}).then(function(){refresh()}).catch(function(e){alert(e.message)})}" +
+    "var browseKey='';function browsePath(k){browseKey=k;loadBrowse(byId('cfg_'+k).value||state.source||'')}function closeBrowse(){byId('pathModal').style.display='none'}function chooseBrowsePath(){var p=byId('browsePathInput').value;if(browseKey){byId('cfg_'+browseKey).value=p;if(browseKey==='source')derivePaths(false)}closeBrowse()}function loadBrowse(p){api('/api/browse?dir='+encodeURIComponent(p||'')).then(function(d){byId('browsePathInput').value=d.path;var h='<div class=\"bar\" style=\"margin-top:0\"><button onclick=\"loadBrowse(\\''+esc(d.parent).replace(/'/g,'&#39;')+'\\')\">Up</button>';(d.roots||[]).forEach(function(r){h+='<button onclick=\"loadBrowse(\\''+esc(r).replace(/'/g,'&#39;')+'\\')\">'+esc(r)+'</button>'});h+='</div>';(d.entries||[]).forEach(function(e){h+='<button class=\"dirBtn\" onclick=\"loadBrowse(\\''+esc(e.path).replace(/'/g,'&#39;')+'\\')\">'+esc(e.name)+'</button>'});byId('dirList').innerHTML=h;byId('pathModal').style.display='block'}).catch(function(e){alert(e.message)})}" +
     "function refresh(){api('/api/state').then(function(d){state=d.state;job=d.job;lab=d.lab;fill();renderLinks(d.files);renderStatus()})}setInterval(refresh,2000);refresh();" +
     "</script></body></html>";
 }
@@ -4869,6 +5014,57 @@ function startDashboardUi(opts) {
     if (asLab) labJob = target; else currentJob = target;
     return target;
   }
+  function runSequence() {
+    const target = { id: ++jobSeq, mode: "pipeline", running: true, startedAt: new Date().toISOString(), finishedAt: "", exitCode: null, error: "", log: [] };
+    currentJob = target;
+    const modes = UI_SEQUENCE_MODES.slice();
+    const runStep = function (i) {
+      if (i >= modes.length) {
+        uiAppendLog(target, "\n[pipeline] starting Local Lab\n");
+        try {
+          if (!(labJob && labJob.running)) startChild("lab", uiBuildArgs("lab", state, true), true);
+        } catch (e) {
+          uiAppendLog(target, "[pipeline] lab skipped: " + e.message + "\n");
+        }
+        target.running = false;
+        target.exitCode = 0;
+        target.finishedAt = new Date().toISOString();
+        uiAppendLog(target, "[pipeline] complete\n");
+        return;
+      }
+      const mode = modes[i];
+      let args;
+      try {
+        args = uiBuildArgs(mode, state, false);
+      } catch (e) {
+        target.running = false;
+        target.exitCode = 2;
+        target.error = e.message;
+        target.finishedAt = new Date().toISOString();
+        uiAppendLog(target, "[pipeline] " + mode + " skipped: " + e.message + "\n");
+        return;
+      }
+      uiAppendLog(target, "\n[pipeline] " + (i + 1) + "/" + modes.length + " " + mode + "\n");
+      uiAppendLog(target, "$ node run-jquery35-v5.js " + args.map(function (a) { return /\s/.test(a) ? '"' + a + '"' : a; }).join(" ") + "\n");
+      const child = cp.spawn(process.execPath, [uiRunnerScript()].concat(args), { cwd: __dirname, stdio: ["ignore", "pipe", "pipe"] });
+      target.child = child;
+      child.stdout.on("data", function (d) { uiAppendLog(target, d); });
+      child.stderr.on("data", function (d) { uiAppendLog(target, d); });
+      child.on("error", function (e) { target.error = e.message; uiAppendLog(target, "\n[spawn error] " + e.message + "\n"); });
+      child.on("close", function (code) {
+        if (code !== 0) {
+          target.running = false;
+          target.exitCode = code;
+          target.finishedAt = new Date().toISOString();
+          uiAppendLog(target, "[pipeline] stopped at " + mode + " exit=" + code + "\n");
+          return;
+        }
+        runStep(i + 1);
+      });
+    };
+    runStep(0);
+    return target;
+  }
   const server = http.createServer(function (req, res) {
     try {
       const u = new URL(req.url, "http://localhost");
@@ -4879,6 +5075,17 @@ function startDashboardUi(opts) {
       }
       if (req.method === "GET" && u.pathname === "/api/state") {
         uiSendJson(res, 200, { state: state, job: uiJobView(currentJob), lab: uiJobView(labJob), files: uiReportFileList(state) });
+        return;
+      }
+      if (req.method === "GET" && u.pathname === "/api/browse") {
+        uiSendJson(res, 200, uiListDirectory(u.searchParams.get("dir") || ""));
+        return;
+      }
+      if (req.method === "POST" && u.pathname === "/api/default-paths") {
+        uiReadJson(req, function (err, body) {
+          if (err) { uiSendJson(res, 400, { ok: false, error: err.message }); return; }
+          uiSendJson(res, 200, uiDerivedPaths(body.source || state.source));
+        });
         return;
       }
       if (req.method === "POST" && u.pathname === "/api/config") {
@@ -4903,6 +5110,16 @@ function startDashboardUi(opts) {
             uiSendJson(res, 400, { ok: false, error: e.message });
           }
         });
+        return;
+      }
+      if (req.method === "POST" && u.pathname === "/api/run-sequence") {
+        if (currentJob && currentJob.running) { uiSendJson(res, 409, { ok: false, error: "job already running" }); return; }
+        try {
+          const j = runSequence();
+          uiSendJson(res, 200, { ok: true, job: uiJobView(j) });
+        } catch (e) {
+          uiSendJson(res, 400, { ok: false, error: e.message });
+        }
         return;
       }
       if (req.method === "POST" && u.pathname === "/api/lab/start") {
@@ -5061,6 +5278,9 @@ const ST_UTIL_JS = [
   '\t$list.unbind("mouseover");',
   "}",
   '$("#panel").removeClass("on");',
+  '$("#chain").removeClass("on").',
+  'unbind("focus").',
+  'unbind("blur");',
   "var fn2 = onRow.bind(this);",
   'var greeting = $.trim(" hi ");',
   "",
@@ -5161,7 +5381,7 @@ function selfTest(opts) {
       trimPlanFinding ? JSON.stringify([trimPlanFinding.priority, trimPlanFinding.action]) : "finding not found");
     check("effective include resolved (list.jsp sees layout core)", m1.pages.some(function (p) { return p.rel.indexOf("views/sample/list.jsp") >= 0 && p.oldCore && p.effectiveScripts >= 3; }), "");
     check("function-bind not touched (onRow.bind)", !m1.findings.some(function (f) { return f.rel === "js/util.js" && f.category === "bind-to-on" && f.action === "Changed" && f.line >= 16; }), "");
-    ["summary.csv", "apiFindings.csv", "focusQueue.csv", "critical.csv", "xssHigh.csv", "assistant_packet.txt", "chat_summary.txt", "index.html", "jquery35_report.xls", "jspPages.csv", "pageScriptEffective.csv", "ajaxEndpoints.csv", "serverEndpoints.csv", "ajaxToServerMap.csv", "hermes_server_evidence.json", "airgap_manifest.json", "airgap_manifest.txt", "mock_routes.json"].forEach(function (f) {
+    ["summary.csv", "apiFindings.csv", "findingCategorySummary.csv", "directoryRiskSummary.csv", "focusQueue.csv", "critical.csv", "xssHigh.csv", "assistant_packet.txt", "chat_summary.txt", "index.html", "jquery35_report.xls", "jspPages.csv", "pageScriptEffective.csv", "ajaxEndpoints.csv", "serverEndpoints.csv", "ajaxToServerMap.csv", "hermes_server_evidence.json", "airgap_manifest.json", "airgap_manifest.txt", "mock_routes.json"].forEach(function (f) {
       check("report file " + f, exists(path.join(r1, f)), "");
     });
     const mockRoutes = JSON.parse(readUtf8(path.join(r1, "mock_routes.json")));
@@ -5170,6 +5390,7 @@ function selfTest(opts) {
     check("dashboard focus split-view modal present", indexHtml.indexOf("focusDetailModal") >= 0 && indexHtml.indexOf("__JQ35_FOCUS_DETAILS__") >= 0 && indexHtml.indexOf("openFocusDetail(") >= 0, "");
     check("dashboard staged action queue present", indexHtml.indexOf("단계별 조치 큐") >= 0 && indexHtml.indexOf("조치 범위 로드맵</h2>") < 0 && indexHtml.indexOf("단계별 FocusQueue") < 0 && indexHtml.indexOf("1차 최소") >= 0 && indexHtml.indexOf("2차 안정화") >= 0 && indexHtml.indexOf("3차 최대/후속") >= 0, "");
     check("dashboard stage counts split total auto queue", indexHtml.indexOf("<span>전체</span>") >= 0 && indexHtml.indexOf("<span>자동</span>") >= 0 && indexHtml.indexOf("<span>큐</span>") >= 0, "");
+    check("dashboard category and directory summaries present", indexHtml.indexOf("유형/경로 분포") >= 0 && indexHtml.indexOf("event-shortcut-load") >= 0 && indexHtml.indexOf("directoryRiskSummary.csv") >= 0, "");
 
     log("self-test 2/8: autofix");
     const m2 = buildModel(mk({ source: src, target: t1, report: r1 }), "autofix");
@@ -5182,6 +5403,10 @@ function selfTest(opts) {
     check("AutoInferred blean heuristic", utilTobe.indexOf('$("#lineDel").prop("disabled", blean)') >= 0, "");
     check("delegate -> on", utilTobe.indexOf('.on("click", ".row", onRow)') >= 0, "");
     check("unbind -> off", utilTobe.indexOf('$list.off("mouseover")') >= 0, "");
+    check("trailing-dot chain rewrite preserves newline",
+      utilTobe.indexOf('removeClass("on").\r\noff("focus").\r\noff("blur")') >= 0 &&
+      utilTobe.indexOf('removeClass("on").off("focus")') < 0,
+      utilTobe);
     check("Function.bind preserved", utilTobe.indexOf("onRow.bind(this)") >= 0, "");
     const indexHtmlAuto = readUtf8(path.join(r1, "index.html"));
     const detailMatch = indexHtmlAuto.match(/window\.__JQ35_FOCUS_DETAILS__=([\s\S]*?);\n\(function/);
@@ -5379,10 +5604,17 @@ function selfTest(opts) {
     check("ui dashboard contains run API and report link surface",
       uiHtml.indexOf("/api/run") >= 0 && uiHtml.indexOf("/api/state") >= 0 && uiHtml.indexOf("기존 산출물") >= 0 && uiHtml.indexOf("Local Lab") >= 0,
       "");
+    check("ui dashboard contains browse and pipeline controls",
+      uiHtml.indexOf("/api/browse") >= 0 && uiHtml.indexOf("/api/run-sequence") >= 0 && uiHtml.indexOf("Browse") >= 0 && uiHtml.indexOf("Run Pipeline") >= 0,
+      "");
     const uiArgs = uiBuildArgs("autofix", normalizedUiState({ source: src, target: t1, report: r1 }, defaultUiState(mk({}))), false);
     check("ui autofix command includes target/report/source",
       uiArgs.indexOf("--source") >= 0 && uiArgs.indexOf("--target") >= 0 && uiArgs.indexOf("--report") >= 0,
       uiArgs.join(" "));
+    const derived = uiDerivedPaths(src);
+    check("ui derived paths create sibling target/report defaults",
+      derived.target.indexOf(path.basename(src) + "_jquery35_tobe") >= 0 && /jquery35_report_v5$/.test(derived.report),
+      JSON.stringify(derived));
     check("ui child runner uses wrapper script",
       path.basename(uiRunnerScript()) === "run-jquery35-v5.js" && exists(uiRunnerScript()),
       uiRunnerScript());
