@@ -18,7 +18,7 @@
 - **Java/Spring 정적 증거** — Spring을 띄우지 않고 `@RequestMapping` 계열과 XML 설정을 읽어 `ajaxToServerMap.csv`, `serverEndpoints.csv`, `hermes_server_evidence.json`을 생성하고 mock route에 컨트롤러 힌트를 붙입니다.
 - **폐쇄망 배포 산출물** — `airgap_manifest.json/txt`로 무의존/무통신 증빙을 남기고, `--mode release-zip`으로 공개 배포용 ZIP을 생성합니다.
 - **로컬 웹 콘솔** — `실행0_웹대시보드.bat` 또는 `--mode ui`로 브라우저에서 plan/autofix/patch/probe/review/verify/release를 실행하고 기존 보고서 HTML을 바로 엽니다.
-- **자체 검증 내장** — `--mode self-test`가 임시 샘플 프로젝트를 만들어 전체 사이클(95개 체크)을 검증. v5.5.0은 jQuery 3.5.1 안착 기준에 로컬 웹 콘솔을 추가합니다.
+- **자체 검증 내장** — `--mode self-test`가 임시 샘플 프로젝트를 만들어 전체 사이클(96개 체크)을 검증. v5.5.1은 jQuery 3.5.1 안착 기준에 로컬 웹 콘솔과 AS-IS/TO-BE 라인 매핑 보정을 포함합니다.
 
 ## 빠른 시작
 

@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.5.0";
+const TOOL_VERSION = "5.5.1";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -3277,7 +3277,71 @@ function snippetFromRoot(root, rel, line, contextLines, missingNote) {
   if (!root) return { available: false, note: missingNote || "not available", rows: [] };
   const abs = path.join(root, toPosix(rel).split("/").join(path.sep));
   if (!exists(abs)) return { available: false, note: "file not found: " + rel, rows: [] };
-  return { available: true, note: "", rows: snippetRows(readLatin1(abs), line, contextLines) };
+  return snippetFromText(readLatin1(abs), line, contextLines, "");
+}
+function snippetFromText(text, line, contextLines, note) {
+  return { available: true, note: note || "", line: line, rows: snippetRows(text, line, contextLines) };
+}
+function appliedEditsForCtx(ctx) {
+  const edits = [];
+  (ctx.findings || []).forEach(function (f) {
+    if (f.action === "Changed" && f.editStart !== undefined && f.editEnd !== undefined && f.replacement !== undefined) {
+      edits.push({ s: f.editStart, e: f.editEnd, r: String(f.replacement), f: f });
+    }
+  });
+  edits.sort(function (a, b) { return a.s - b.s; });
+  const applied = [];
+  let lastEnd = -1;
+  edits.forEach(function (ed) {
+    if (ed.s < lastEnd) return;
+    applied.push(ed);
+    lastEnd = ed.e;
+  });
+  return applied;
+}
+function mapSourceIndexToTarget(ctx, idx) {
+  if (!ctx || idx === undefined || idx === null) return { idx: -1, reason: "no source index" };
+  let pos = parseInt(idx, 10);
+  if (!Number.isFinite(pos) || pos < 0) return { idx: -1, reason: "invalid source index" };
+  let delta = 0;
+  const edits = appliedEditsForCtx(ctx);
+  for (let i = 0; i < edits.length; i++) {
+    const ed = edits[i];
+    const oldLen = ed.e - ed.s;
+    const newLen = ed.r.length;
+    if (pos < ed.s) break;
+    if (pos >= ed.s && pos <= ed.e) {
+      return { idx: ed.s + delta, reason: "inside auto edit span" };
+    }
+    delta += newLen - oldLen;
+  }
+  return { idx: pos + delta, reason: delta === 0 ? "same line map" : "line adjusted by previous auto edits" };
+}
+function findingSourceLine(ctx, f) {
+  if (ctx && f && f.idx !== undefined && f.idx !== null && !(f.category === "jquery-core-patched")) {
+    const n = parseInt(f.idx, 10);
+    if (Number.isFinite(n) && n >= 0) return lineOf(ctx.lineStarts, n);
+  }
+  return f.line || 1;
+}
+function targetSnippetForFinding(model, ctx, f, sourceLine, contextLines, missingNote) {
+  if (!(model.targetWcRoot && isDir(model.targetWcRoot))) {
+    return { available: false, note: missingNote || "TO-BE not generated in this mode", rows: [] };
+  }
+  const abs = path.join(model.targetWcRoot, toPosix(f.rel).split("/").join(path.sep));
+  if (!exists(abs)) return { available: false, note: "file not found: " + f.rel, rows: [] };
+  const text = readLatin1(abs);
+  const starts = lineStartsOf(text);
+  let targetLine = sourceLine;
+  let note = "same source line";
+  if (ctx && f.idx !== undefined && f.idx !== null) {
+    const mapped = mapSourceIndexToTarget(ctx, f.idx);
+    if (mapped.idx >= 0) {
+      targetLine = lineOf(starts, Math.min(mapped.idx, Math.max(0, text.length)));
+      note = mapped.reason;
+    }
+  }
+  return snippetFromText(text, targetLine, contextLines, note);
 }
 function verificationHint(model, f) {
   if (f.priority === "Critical" || f.category === "jquery-core-old") return "jQuery " + model.profile.jquery.targetVersion + "과 Migrate 파일 존재, core -> migrate 로드 순서, 중복 core 로드 여부, 주요 화면 JQMIGRATE/JS error를 확인하세요.";
@@ -3323,11 +3387,10 @@ function statusClass(d) {
   return "missing";
 }
 function findingDetail(model, f, rank, modalIndex, sourceKind) {
-  const hasTarget = model.targetWcRoot && isDir(model.targetWcRoot);
   const ctx = model.ctxByRel[f.rel];
-  const line = f.line || (ctx ? lineOf(ctx.lineStarts, f.idx || 0) : 1);
-  const asIs = ctx ? { available: true, note: "", rows: snippetRows(ctx.text, line, 5) } : snippetFromRoot(model.webContentRoot, f.rel, line, 5, "source not available");
-  const toBe = snippetFromRoot(hasTarget ? model.targetWcRoot : "", f.rel, line, 5, hasTarget ? "TO-BE file not available" : "TO-BE not generated in this mode");
+  const line = ctx ? findingSourceLine(ctx, f) : (f.line || 1);
+  const asIs = ctx ? snippetFromText(ctx.text, line, 5, "source scan span") : snippetFromRoot(model.webContentRoot, f.rel, line, 5, "source not available");
+  const toBe = targetSnippetForFinding(model, ctx, f, line, 5, "TO-BE not generated in this mode");
   return {
     rank: rank, modalIndex: modalIndex, sourceKind: sourceKind, stage: focusStageKey(f), rel: f.rel, line: line, category: f.category, priority: f.priority,
     confidence: f.confidence, action: f.action, pattern: f.pattern,
@@ -4989,10 +5052,15 @@ const ST_UTIL_JS = [
   "var blean = true;",
   '$("#lineDel").attr("disabled", blean);',
   'var $list = $("#list");',
-  '$list.delegate(".row", "click", onRow);',
+  '$list.delegate(',
+  '  ".row",',
+  '  "click",',
+  '  onRow',
+  ');',
   "function onRow() {",
   '\t$list.unbind("mouseover");',
   "}",
+  '$("#panel").removeClass("on");',
   "var fn2 = onRow.bind(this);",
   'var greeting = $.trim(" hi ");',
   "",
@@ -5115,6 +5183,20 @@ function selfTest(opts) {
     check("delegate -> on", utilTobe.indexOf('.on("click", ".row", onRow)') >= 0, "");
     check("unbind -> off", utilTobe.indexOf('$list.off("mouseover")') >= 0, "");
     check("Function.bind preserved", utilTobe.indexOf("onRow.bind(this)") >= 0, "");
+    const indexHtmlAuto = readUtf8(path.join(r1, "index.html"));
+    const detailMatch = indexHtmlAuto.match(/window\.__JQ35_FOCUS_DETAILS__=([\s\S]*?);\n\(function/);
+    let dashboardDetails = [];
+    try { dashboardDetails = detailMatch ? JSON.parse(detailMatch[1]) : []; } catch (e) { dashboardDetails = []; }
+    const unbindDetail = dashboardDetails.filter(function (d) { return d.sourceKind === "AutoFixed" && d.category === "unbind-to-off"; })[0];
+    const asIsHit = unbindDetail && unbindDetail.asIs && unbindDetail.asIs.rows.filter(function (r) { return r.hit; })[0];
+    const toBeHit = unbindDetail && unbindDetail.toBe && unbindDetail.toBe.rows.filter(function (r) { return r.hit; })[0];
+    check("dashboard TO-BE snippet follows shifted edit location",
+      !!unbindDetail && !!asIsHit && !!toBeHit &&
+      asIsHit.text.indexOf('.unbind("mouseover")') >= 0 &&
+      toBeHit.text.indexOf('.off("mouseover")') >= 0 &&
+      toBeHit.text.indexOf("removeClass") < 0 &&
+      unbindDetail.asIs.line !== unbindDetail.toBe.line,
+      JSON.stringify(unbindDetail));
     const listTobe = readLatin1(path.join(t1, "WebContent", "WEB-INF", "views", "sample", "list.jsp"));
     check("window load -> on(load)", listTobe.indexOf('.on("load", function(){ initPage(); })') >= 0, "");
     check("bind -> on in jsp", listTobe.indexOf('$("#btn1").on("click"') >= 0, "");

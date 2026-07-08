@@ -53,9 +53,9 @@ jquery35-local-agent v5 - 명령 예시 모음
 
 11) 공개 배포용 ZIP 생성 (source 불필요):
   node run-jquery35-v5.js --report ".\release" --mode release-zip
-  -> .\release\jquery35-local-agent-v5.5.0-public.zip
+  -> .\release\jquery35-local-agent-v5.5.1-public.zip
 
-12) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 95개 체크):
+12) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 96개 체크):
   node run-jquery35-v5.js --mode self-test
 
 유용한 옵션:

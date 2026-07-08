@@ -108,7 +108,7 @@ node run-jquery35-v5.js --report ".\release" --mode release-zip
 | `airgap-manifest` | 폐쇄망 반입 증빙(`airgap_manifest.json/txt`)만 생성 | X | X |
 | `release-zip` | 공개 배포용 ZIP + release manifest 생성 (`--source` 불필요) | X | X |
 | `ui` | 브라우저 웹 콘솔 기동. 경로 저장, 모드 실행, Local Lab 제어, 기존 HTML 산출물 열기 | X | X |
-| `self-test` | 회사 코드 없이 도구 자체 정상동작 검증 (95개 체크) | X | X |
+| `self-test` | 회사 코드 없이 도구 자체 정상동작 검증 (96개 체크) | X | X |
 
 ## 5. 판정 기준 (실무 기준)
 
