@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.6.0";
+const TOOL_VERSION = "5.6.1";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -4765,7 +4765,7 @@ function loadUiState(opts) {
   });
   if (opts["migrate-trace"]) st.migrateTrace = true;
   if (opts["no-server-scan"]) st.noServerScan = true;
-  return st;
+  return st.source ? uiApplySourceDefaults(st, raw || {}, !!opts.source && !raw) : st;
 }
 
 function saveUiState(opts, state) {
@@ -4788,17 +4788,157 @@ function normalizedUiState(input, prev) {
   return out;
 }
 
-function uiDerivedPaths(source) {
+function uiHasExt(root, exts, maxDirs) {
+  if (!root || !isDir(root)) return false;
+  const want = {};
+  exts.forEach(function (e) { want[e.toLowerCase()] = 1; });
+  let seenDirs = 0;
+  const stack = [root];
+  while (stack.length && seenDirs < (maxDirs || 500)) {
+    const dir = stack.pop();
+    seenDirs++;
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch (e) { continue; }
+    for (let i = 0; i < names.length; i++) {
+      const name = names[i];
+      const abs = path.join(dir, name);
+      let st;
+      try { st = fs.statSync(abs); } catch (e) { continue; }
+      if (st.isDirectory()) {
+        if (!EXCLUDE_DIRS[name.toLowerCase()]) stack.push(abs);
+      } else if (want[path.extname(name).toLowerCase()]) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function uiProjectRootFromSource(root) {
+  const parts = toPosix(path.resolve(root)).split("/");
+  const leaf = parts[parts.length - 1].toLowerCase();
+  if (leaf === "webcontent" && parts.length > 1) return path.dirname(root);
+  if (leaf === "webapp" && parts.length >= 3 && parts[parts.length - 2].toLowerCase() === "main" && parts[parts.length - 3].toLowerCase() === "src") {
+    return path.resolve(root, "..", "..", "..");
+  }
+  return root;
+}
+
+function uiFindServerSource(sourceRoot, projectRoot) {
+  const roots = uniq([
+    path.join(projectRoot, "src", "main", "java"),
+    path.join(projectRoot, "src"),
+    path.join(projectRoot, "java"),
+    path.join(projectRoot, "WEB-INF", "src"),
+    path.join(sourceRoot, "src", "main", "java"),
+    path.join(sourceRoot, "src"),
+    sourceRoot,
+    projectRoot
+  ]);
+  for (let i = 0; i < roots.length; i++) {
+    if (uiHasExt(roots[i], [".java", ".xml"], 220)) return path.resolve(roots[i]);
+  }
+  return "";
+}
+
+function uiFindRulepack(sourceRoot, projectRoot) {
+  const files = [
+    path.join(sourceRoot, "jquery35-rulepack.json"),
+    path.join(projectRoot, "jquery35-rulepack.json")
+  ];
+  for (let i = 0; i < files.length; i++) if (exists(files[i])) return path.resolve(files[i]);
+  const dirs = [
+    path.join(sourceRoot, "jquery35-rulepack"),
+    path.join(projectRoot, "jquery35-rulepack")
+  ];
+  for (let j = 0; j < dirs.length; j++) if (isDir(dirs[j])) return path.resolve(dirs[j]);
+  return "";
+}
+
+function uiFindProfile(sourceRoot, projectRoot, reportRoot) {
+  const files = [
+    path.join(sourceRoot, "project-profile.json"),
+    path.join(projectRoot, "project-profile.json"),
+    path.join(reportRoot, "project-profile.generated.json")
+  ];
+  for (let i = 0; i < files.length; i++) if (exists(files[i])) return path.resolve(files[i]);
+  return path.resolve(path.join(reportRoot, "project-profile.generated.json"));
+}
+
+function uiWriteGeneratedProfile(file, sourceRoot, projectRoot, webContentRoot, serverSource) {
+  if (!file || exists(file)) return;
+  let webRel = "WebContent";
+  if (webContentRoot && path.resolve(webContentRoot).toLowerCase() === path.resolve(sourceRoot).toLowerCase()) webRel = ".";
+  else if (webContentRoot && isUnderDir(webContentRoot, sourceRoot)) webRel = toPosix(path.relative(sourceRoot, webContentRoot)) || ".";
+  const profile = {
+    generatedBy: TOOL_NAME + " v" + TOOL_VERSION + " UI auto setup",
+    note: "Auto-generated from source path. Keep learnedWrappers/learnedFindings here after local review.",
+    webContentDir: webRel,
+    webRootCandidates: DEFAULT_WEB_ROOT_CANDIDATES.slice(),
+    webRootSignals: DEFAULT_WEB_ROOT_SIGNALS.slice(),
+    pathVariables: Object.assign({}, DEFAULT_PATH_VARS),
+    vendorPatterns: DEFAULT_VENDOR_PATTERNS.slice(),
+    appScriptHints: DEFAULT_APP_HINTS.slice(),
+    ignoreAttrPatterns: DEFAULT_IGNORE_ATTR_PATTERNS.slice(),
+    jquery: {
+      targetVersion: DEFAULT_JQUERY_VERSION,
+      migrateVersion: DEFAULT_MIGRATE_VERSION,
+      coreFile: "jquery-" + DEFAULT_JQUERY_VERSION + ".min.js",
+      migrateFile: "jquery-migrate-" + DEFAULT_MIGRATE_VERSION + ".min.js",
+      newJquerySrc: "",
+      newMigrateSrc: "",
+      migrateTrace: false
+    },
+    probe: { enabled: true, injectTargetHints: DEFAULT_PROBE_HINTS.slice() },
+    serverScan: mergeConfig(jsonClone(DEFAULT_SERVER_SCAN), serverSource ? { sourceOverride: serverSource } : {}),
+    mockDefaults: jsonClone(DEFAULT_MOCK_DEFAULTS),
+    learnedWrappers: [],
+    learnedFindings: [],
+    sensitiveIdentifiers: []
+  };
+  writeUtf8(file, JSON.stringify(profile, null, 2) + "\n", false);
+}
+
+function uiDerivedPaths(source, createProfile) {
   const src = String(source || "").trim();
   if (!src) return {};
   const root = path.resolve(src);
-  const parent = path.dirname(root);
-  const base = path.basename(root).replace(/[\\\/]+$/, "") || "legacy-app";
+  const projectRoot = uiProjectRootFromSource(root);
+  const parent = path.dirname(projectRoot);
+  const base = path.basename(projectRoot).replace(/[\\\/]+$/, "") || "legacy-app";
+  const target = path.join(parent, base + "_jquery35_tobe");
+  const report = path.join(parent, base + "_jquery35_report_v5");
+  const rulepack = uiFindRulepack(root, projectRoot);
+  const profileForDetect = defaultProfile(loadRulepack(rulepack ? { rulepack: rulepack } : {}, root));
+  const webContentRoot = detectWebContent(root, profileForDetect) || "";
+  const serverSource = uiFindServerSource(root, projectRoot);
+  const profile = uiFindProfile(root, projectRoot, report);
+  if (createProfile) uiWriteGeneratedProfile(profile, root, projectRoot, webContentRoot, serverSource);
   return {
-    target: path.join(parent, base + "_jquery35_tobe"),
-    report: path.join(parent, "jquery35_report_v5"),
-    verifySource: path.join(parent, base + "_jquery35_tobe")
+    source: root,
+    projectRoot: projectRoot,
+    webContentRoot: webContentRoot,
+    target: target,
+    report: report,
+    verifySource: target,
+    profile: profile,
+    profileExists: exists(profile),
+    rulepack: rulepack,
+    serverSource: serverSource
   };
+}
+
+function uiApplySourceDefaults(state, prev, force) {
+  if (!state.source) return state;
+  const prevSource = prev && prev.source ? path.resolve(prev.source) : "";
+  const sourceChanged = !prevSource || path.resolve(state.source) !== prevSource;
+  const d = uiDerivedPaths(state.source, true);
+  ["target", "report", "verifySource", "profile", "serverSource"].forEach(function (k) {
+    if (force || sourceChanged || !state[k]) state[k] = d[k] || state[k];
+  });
+  if ((force || sourceChanged || !state.rulepack) && d.rulepack) state.rulepack = d.rulepack;
+  state.source = d.source || state.source;
+  return state;
 }
 
 function uiListDirectory(dirRaw) {
@@ -4969,12 +5109,13 @@ function dashboardUiHtml() {
   const fields = ["source:원본 source", "target:TO-BE target", "report:보고서/report", "profile:project-profile.json", "rulepack:rulepack", "serverSource:Java source", "verifySource:verify-clean source", "labPort:Lab port", "maxReviewCases:review cases", "contextLines:context lines", "maxReviewLines:review lines"].map(function (p) {
     const a = p.split(":");
     const browse = /^(source|target|report|profile|rulepack|serverSource|verifySource)$/.test(a[0]);
-    return "<div class=\"field\"><label>" + a[1] + "</label><div class=\"pathRow\"><input id=\"cfg_" + a[0] + "\">" + (browse ? "<button type=\"button\" class=\"mini\" onclick=\"browsePath('" + a[0] + "')\">Browse</button>" : "") + "</div></div>";
+    const auto = a[0] === "source" ? " onchange=\"autoSetupFromSource(true)\" onblur=\"autoSetupFromSource(false)\"" : "";
+    return "<div class=\"field\"><label>" + a[1] + "</label><div class=\"pathRow\"><input id=\"cfg_" + a[0] + "\"" + auto + ">" + (browse ? "<button type=\"button\" class=\"mini\" onclick=\"browsePath('" + a[0] + "')\">Browse</button>" : "") + "</div></div>";
   }).join("");
   return "<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\"><title>JQ35 Local Console</title><style>" +
     "*{box-sizing:border-box}body{margin:0;background:#eef2f6;color:#1f2937;font-family:'Malgun Gothic',AppleGothic,Arial,sans-serif}.shell{max-width:1480px;margin:0 auto;padding:18px}.top{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:15px 17px;display:flex;justify-content:space-between;gap:14px}.eyebrow{font-size:11px;font-weight:800;color:#667085;text-transform:uppercase}.top h1{font-size:21px;margin:3px 0}.sub{font-size:12px;color:#667085;word-break:break-all}.pill{display:inline-block;border:1px solid #d7ddea;background:#f8fafc;border-radius:999px;padding:4px 9px;font-size:12px;margin:2px}.grid{display:grid;grid-template-columns:430px minmax(0,1fr);gap:14px;margin-top:14px}.panel{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:13px}.panel h2{font-size:14px;margin:0 0 10px}.form{display:grid;gap:8px}.field label{display:block;font-size:11px;font-weight:800;color:#475467;margin:0 0 3px}.pathRow{display:flex;gap:6px}.field input{width:100%;min-width:0;border:1px solid #c8d1df;border-radius:6px;padding:8px 9px;font:12px Consolas,Menlo,monospace}.mini{padding:7px 8px;flex:0 0 auto}.checks{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px}.checks label{border:1px solid #d8dee8;border-radius:6px;padding:7px;background:#f8fafc}.bar{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}button{border:1px solid #9aa7b8;background:#fff;border-radius:6px;padding:8px 11px;font-weight:800;font-size:12px;cursor:pointer}button.primary{background:#1d4ed8;color:#fff;border-color:#1d4ed8}button.danger{border-color:#b42318;color:#b42318}button:disabled{opacity:.48;cursor:not-allowed}.ops{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.op{border:1px solid #d8dee8;border-radius:8px;padding:11px;background:#fbfcfe;min-height:104px}.op b{display:block;font-size:13px}.op span{display:block;font-size:12px;color:#667085;margin:5px 0 10px;line-height:1.35}.op button{width:100%}.links{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.link{display:block;border:1px solid #d8dee8;background:#fbfcfe;border-radius:8px;padding:9px;text-decoration:none;color:#1f2937}.link b{display:block;font-size:12px}.link span{font-size:11px;color:#667085}.muted{font-size:12px;color:#667085}.ok{color:#166534}.bad{color:#b42318}.warn{color:#b54708}.log{height:360px;overflow:auto;background:#101828;color:#d1fadf;border-radius:8px;padding:10px;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap}.split{display:grid;grid-template-columns:1fr 1fr;gap:10px}.modal{position:fixed;inset:0;z-index:2000;background:rgba(15,23,42,.55);display:none}.modalIn{position:absolute;inset:6%;background:#fff;border-radius:8px;border:1px solid #344054;display:flex;flex-direction:column}.modalHead{padding:11px 13px;border-bottom:1px solid #d8dee8;background:#f5f7fb;display:flex;gap:8px;align-items:center}.modalHead input{flex:1;border:1px solid #c8d1df;border-radius:6px;padding:8px;font:12px Consolas,Menlo,monospace}.dirList{padding:10px;overflow:auto}.dirBtn{display:block;width:100%;text-align:left;margin:0 0 5px;border-color:#d8dee8;background:#fbfcfe}@media(max-width:1120px){.grid,.split{grid-template-columns:1fr}.ops,.links{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:700px){.shell{padding:10px}.ops,.links{grid-template-columns:1fr}.top{display:block}.pathRow{display:block}.mini{margin-top:4px;width:100%}}" +
     "</style></head><body><main class=\"shell\"><section class=\"top\"><div><div class=\"eyebrow\">jquery35-local-agent v" + htmlEsc(TOOL_VERSION) + "</div><h1>JQ35 Local Console</h1><div class=\"sub\" id=\"pathLine\"></div></div><div><span class=\"pill\" id=\"jobPill\">idle</span><span class=\"pill\" id=\"labPill\">lab off</span></div></section><div class=\"grid\"><aside class=\"panel\"><h2>경로</h2><div class=\"form\" id=\"cfgForm\">" + fields +
-    "<div class=\"checks\"><label><input type=\"checkbox\" id=\"cfg_migrateTrace\"> migrate trace</label><label><input type=\"checkbox\" id=\"cfg_noServerScan\"> no server scan</label></div><div class=\"bar\"><button class=\"primary\" onclick=\"saveConfig()\">Save</button><button onclick=\"derivePaths(true)\">Auto paths</button><button onclick=\"refresh()\">Refresh</button></div></div></aside><section><div class=\"panel\"><h2>실행</h2><div class=\"ops\" id=\"ops\"></div></div><div class=\"panel\" style=\"margin-top:14px\"><h2>기존 산출물</h2><div id=\"links\" class=\"links\"></div></div><div class=\"panel\" style=\"margin-top:14px\"><div class=\"split\"><div><h2>작업 로그</h2></div><div class=\"bar\" style=\"justify-content:flex-end;margin-top:0\"><button onclick=\"refresh()\">Refresh</button><button class=\"danger\" onclick=\"stopLab()\">Stop Lab</button></div></div><pre id=\"log\" class=\"log\"></pre></div></section></div></main><div id=\"pathModal\" class=\"modal\"><div class=\"modalIn\"><div class=\"modalHead\"><input id=\"browsePathInput\"><button onclick=\"loadBrowse(byId('browsePathInput').value)\">Open</button><button class=\"primary\" onclick=\"chooseBrowsePath()\">Use</button><button onclick=\"closeBrowse()\">Close</button></div><div id=\"dirList\" class=\"dirList\"></div></div></div><script>" +
+    "<div class=\"checks\"><label><input type=\"checkbox\" id=\"cfg_migrateTrace\"> migrate trace</label><label><input type=\"checkbox\" id=\"cfg_noServerScan\"> no server scan</label></div><div class=\"bar\"><button class=\"primary\" onclick=\"saveConfig()\">Save</button><button onclick=\"autoSetupFromSource(true)\">Auto setup</button><button onclick=\"refresh()\">Refresh</button></div></div></aside><section><div class=\"panel\"><h2>실행</h2><div class=\"ops\" id=\"ops\"></div></div><div class=\"panel\" style=\"margin-top:14px\"><h2>기존 산출물</h2><div id=\"links\" class=\"links\"></div></div><div class=\"panel\" style=\"margin-top:14px\"><div class=\"split\"><div><h2>작업 로그</h2></div><div class=\"bar\" style=\"justify-content:flex-end;margin-top:0\"><button onclick=\"refresh()\">Refresh</button><button class=\"danger\" onclick=\"stopLab()\">Stop Lab</button></div></div><pre id=\"log\" class=\"log\"></pre></div></section></div></main><div id=\"pathModal\" class=\"modal\"><div class=\"modalIn\"><div class=\"modalHead\"><input id=\"browsePathInput\"><button onclick=\"loadBrowse(byId('browsePathInput').value)\">Open</button><button class=\"primary\" onclick=\"chooseBrowsePath()\">Use</button><button onclick=\"closeBrowse()\">Close</button></div><div id=\"dirList\" class=\"dirList\"></div></div></div><script>" +
     "var state=null,job=null,lab=null;var ops=[['plan','분석','index/report 생성'],['autofix','TO-BE 자동수정','target 폴더 필요'],['patch-jquery','jQuery 교체','3.5.1 + Migrate'],['probe','Probe 삽입','검증용 target'],['review-pack','AI 리뷰팩','질문지 + 검수팩'],['hermes-pack','Hermes 검수팩','로컬 시험장 포함'],['verify-clean','운영전 검증','target 또는 verify source'],['pr-report','PR/CI 보고서','체크리스트 생성'],['airgap-manifest','폐쇄망 증빙','manifest 생성'],['release-zip','배포 ZIP','작은 반입 파일']];" +
     "function byId(id){return document.getElementById(id)}function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c]})}function api(p,o){return fetch(p,Object.assign({headers:{'Content-Type':'application/json'}},o||{})).then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error(j.error||r.statusText);return j})})}" +
     "function fill(){if(!state)return;['source','target','report','profile','rulepack','serverSource','verifySource','labPort','maxReviewCases','contextLines','maxReviewLines'].forEach(function(k){byId('cfg_'+k).value=state[k]||''});byId('cfg_migrateTrace').checked=!!state.migrateTrace;byId('cfg_noServerScan').checked=!!state.noServerScan;byId('pathLine').textContent='source: '+(state.source||'-')+' / target: '+(state.target||'-')+' / report: '+(state.report||'-')}" +
@@ -4982,12 +5123,12 @@ function dashboardUiHtml() {
     "function renderLinks(files){var h='';(files||[]).forEach(function(f){h+='<a class=\"link\" target=\"_blank\" href=\"'+esc(f.href)+'\"><b>'+esc(f.label)+'</b><span>'+esc(f.file)+' · '+Math.ceil((f.size||0)/1024)+'KB</span></a>'});byId('links').innerHTML=h||'<div class=\"muted\">생성된 report 파일이 없습니다.</div>'}" +
     "function renderStatus(){var jp=byId('jobPill');if(job&&job.running){jp.textContent='running '+job.mode;jp.className='pill warn'}else if(job){jp.textContent='last '+job.mode+' exit '+job.exitCode;jp.className='pill '+(job.exitCode===0?'ok':'bad')}else{jp.textContent='idle';jp.className='pill'}var lp=byId('labPill');if(lab&&lab.running){lp.innerHTML='<a target=\"_blank\" href=\"http://localhost:'+esc(state.labPort||'18080')+'/_pages\">lab '+esc(state.labPort||'18080')+'</a>';lp.className='pill ok'}else{lp.textContent='lab off';lp.className='pill'}byId('log').textContent=job?job.log:'';renderOps()}" +
     "function collect(){var o={};['source','target','report','profile','rulepack','serverSource','verifySource','labPort','maxReviewCases','contextLines','maxReviewLines'].forEach(function(k){o[k]=byId('cfg_'+k).value});o.migrateTrace=byId('cfg_migrateTrace').checked;o.noServerScan=byId('cfg_noServerScan').checked;return o}" +
-    "function saveConfig(){return api('/api/config',{method:'POST',body:JSON.stringify(collect())}).then(function(d){state=d.state;fill();return d})}" +
-    "function derivePaths(force){var src=byId('cfg_source').value;if(!src)return Promise.resolve();return api('/api/default-paths',{method:'POST',body:JSON.stringify({source:src})}).then(function(d){['target','report','verifySource'].forEach(function(k){if(force||!byId('cfg_'+k).value)byId('cfg_'+k).value=d[k]||byId('cfg_'+k).value});return saveConfig()})}" +
+    "function saveConfig(auto){var o=collect();if(auto)o.auto=true;return api('/api/config',{method:'POST',body:JSON.stringify(o)}).then(function(d){state=d.state;fill();return d})}" +
+    "function autoSetupFromSource(force){var src=byId('cfg_source').value;if(!src)return Promise.resolve();return api('/api/default-paths',{method:'POST',body:JSON.stringify({source:src,createProfile:true})}).then(function(d){['source','target','report','profile','rulepack','serverSource','verifySource'].forEach(function(k){if(d[k]&&(force||k==='source'||!byId('cfg_'+k).value))byId('cfg_'+k).value=d[k]});return saveConfig(true)})}function derivePaths(force){return autoSetupFromSource(force)}" +
     "function runMode(m){saveConfig().then(function(){return api('/api/run',{method:'POST',body:JSON.stringify({mode:m})})}).then(function(){refresh()}).catch(function(e){alert(e.message)})}" +
     "function runPipeline(){saveConfig().then(function(){return api('/api/run-sequence',{method:'POST',body:'{}'})}).then(function(){refresh()}).catch(function(e){alert(e.message)})}" +
     "function startLab(){saveConfig().then(function(){return api('/api/lab/start',{method:'POST',body:'{}'})}).then(function(){refresh()}).catch(function(e){alert(e.message)})}function stopLab(){api('/api/lab/stop',{method:'POST',body:'{}'}).then(function(){refresh()}).catch(function(e){alert(e.message)})}" +
-    "var browseKey='';function browsePath(k){browseKey=k;loadBrowse(byId('cfg_'+k).value||state.source||'')}function closeBrowse(){byId('pathModal').style.display='none'}function chooseBrowsePath(){var p=byId('browsePathInput').value;if(browseKey){byId('cfg_'+browseKey).value=p;if(browseKey==='source')derivePaths(false)}closeBrowse()}function loadBrowse(p){api('/api/browse?dir='+encodeURIComponent(p||'')).then(function(d){byId('browsePathInput').value=d.path;var h='<div class=\"bar\" style=\"margin-top:0\"><button onclick=\"loadBrowse(\\''+esc(d.parent).replace(/'/g,'&#39;')+'\\')\">Up</button>';(d.roots||[]).forEach(function(r){h+='<button onclick=\"loadBrowse(\\''+esc(r).replace(/'/g,'&#39;')+'\\')\">'+esc(r)+'</button>'});h+='</div>';(d.entries||[]).forEach(function(e){h+='<button class=\"dirBtn\" onclick=\"loadBrowse(\\''+esc(e.path).replace(/'/g,'&#39;')+'\\')\">'+esc(e.name)+'</button>'});byId('dirList').innerHTML=h;byId('pathModal').style.display='block'}).catch(function(e){alert(e.message)})}" +
+    "var browseKey='';function browsePath(k){browseKey=k;loadBrowse(byId('cfg_'+k).value||state.source||'')}function closeBrowse(){byId('pathModal').style.display='none'}function chooseBrowsePath(){var p=byId('browsePathInput').value;if(browseKey){byId('cfg_'+browseKey).value=p;if(browseKey==='source')autoSetupFromSource(true)}closeBrowse()}function loadBrowse(p){api('/api/browse?dir='+encodeURIComponent(p||'')).then(function(d){byId('browsePathInput').value=d.path;var h='<div class=\"bar\" style=\"margin-top:0\"><button onclick=\"loadBrowse(\\''+esc(d.parent).replace(/'/g,'&#39;')+'\\')\">Up</button>';(d.roots||[]).forEach(function(r){h+='<button onclick=\"loadBrowse(\\''+esc(r).replace(/'/g,'&#39;')+'\\')\">'+esc(r)+'</button>'});h+='</div>';(d.entries||[]).forEach(function(e){h+='<button class=\"dirBtn\" onclick=\"loadBrowse(\\''+esc(e.path).replace(/'/g,'&#39;')+'\\')\">'+esc(e.name)+'</button>'});byId('dirList').innerHTML=h;byId('pathModal').style.display='block'}).catch(function(e){alert(e.message)})}" +
     "function refresh(){api('/api/state').then(function(d){state=d.state;job=d.job;lab=d.lab;fill();renderLinks(d.files);renderStatus()})}setInterval(refresh,2000);refresh();" +
     "</script></body></html>";
 }
@@ -5084,14 +5225,16 @@ function startDashboardUi(opts) {
       if (req.method === "POST" && u.pathname === "/api/default-paths") {
         uiReadJson(req, function (err, body) {
           if (err) { uiSendJson(res, 400, { ok: false, error: err.message }); return; }
-          uiSendJson(res, 200, uiDerivedPaths(body.source || state.source));
+          uiSendJson(res, 200, uiDerivedPaths(body.source || state.source, body.createProfile !== false));
         });
         return;
       }
       if (req.method === "POST" && u.pathname === "/api/config") {
         uiReadJson(req, function (err, body) {
           if (err) { uiSendJson(res, 400, { ok: false, error: err.message }); return; }
+          const prevState = Object.assign({}, state);
           state = normalizedUiState(body, state);
+          state = uiApplySourceDefaults(state, prevState, body.auto === true);
           saveUiState(opts, state);
           uiSendJson(res, 200, { ok: true, state: state });
         });
@@ -5604,17 +5747,25 @@ function selfTest(opts) {
     check("ui dashboard contains run API and report link surface",
       uiHtml.indexOf("/api/run") >= 0 && uiHtml.indexOf("/api/state") >= 0 && uiHtml.indexOf("기존 산출물") >= 0 && uiHtml.indexOf("Local Lab") >= 0,
       "");
-    check("ui dashboard contains browse and pipeline controls",
-      uiHtml.indexOf("/api/browse") >= 0 && uiHtml.indexOf("/api/run-sequence") >= 0 && uiHtml.indexOf("Browse") >= 0 && uiHtml.indexOf("Run Pipeline") >= 0,
+    check("ui dashboard contains browse, auto setup, and pipeline controls",
+      uiHtml.indexOf("/api/browse") >= 0 && uiHtml.indexOf("/api/run-sequence") >= 0 && uiHtml.indexOf("Browse") >= 0 && uiHtml.indexOf("Auto setup") >= 0 && uiHtml.indexOf("Run Pipeline") >= 0,
       "");
     const uiArgs = uiBuildArgs("autofix", normalizedUiState({ source: src, target: t1, report: r1 }, defaultUiState(mk({}))), false);
     check("ui autofix command includes target/report/source",
       uiArgs.indexOf("--source") >= 0 && uiArgs.indexOf("--target") >= 0 && uiArgs.indexOf("--report") >= 0,
       uiArgs.join(" "));
-    const derived = uiDerivedPaths(src);
-    check("ui derived paths create sibling target/report defaults",
-      derived.target.indexOf(path.basename(src) + "_jquery35_tobe") >= 0 && /jquery35_report_v5$/.test(derived.report),
+    const derived = uiDerivedPaths(src, true);
+    check("ui derived paths create project sibling target/report/profile defaults",
+      derived.target.indexOf(path.basename(src) + "_jquery35_tobe") >= 0 &&
+      derived.report.indexOf(path.basename(src) + "_jquery35_report_v5") >= 0 &&
+      derived.profile.indexOf("project-profile.generated.json") >= 0 &&
+      exists(derived.profile),
       JSON.stringify(derived));
+    const uiAutoState = normalizedUiState({ source: src }, defaultUiState(mk({})));
+    uiApplySourceDefaults(uiAutoState, {}, false);
+    check("ui source-only config auto-fills executable paths",
+      !!uiAutoState.target && !!uiAutoState.report && !!uiAutoState.profile && !!uiAutoState.serverSource && uiAutoState.verifySource === uiAutoState.target,
+      JSON.stringify(uiAutoState));
     check("ui child runner uses wrapper script",
       path.basename(uiRunnerScript()) === "run-jquery35-v5.js" && exists(uiRunnerScript()),
       uiRunnerScript());

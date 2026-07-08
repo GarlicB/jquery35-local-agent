@@ -7,7 +7,7 @@ jquery35-local-agent v5 - 빠른 시작
 2. 각 실행*.bat 파일 상단의 경로 3개(SOURCE/TARGET/REPORT)를 내 환경에 맞게 수정
 3. 명령어를 직접 치기 싫으면 먼저 웹 대시보드부터 실행:
 
-   실행0_웹대시보드.bat        <- http://127.0.0.1:18088/ 에서 경로 Browse/자동 산정/원버튼 실행/보고서 열기
+   실행0_웹대시보드.bat        <- http://127.0.0.1:18088/ 에서 source만 지정 후 자동 세팅/원버튼 실행/보고서 열기
 
 4. 명령어 또는 배치파일로 순서대로 실행:
 
@@ -24,7 +24,7 @@ jquery35-local-agent v5 - 빠른 시작
    실행9_배포ZIP생성.bat       <- (선택) 공개 배포용 ZIP 생성
 
 - 원본 소스는 절대 수정되지 않습니다. 모든 변경은 TO-BE 폴더에만 생성됩니다.
-- 웹 대시보드는 CLI 명령을 대신 실행하는 로컬 껍데기입니다. Browse/Auto paths/Run Pipeline을 제공하지만 실제 판정/자동수정 규칙은 배치파일과 동일합니다.
+- 웹 대시보드는 CLI 명령을 대신 실행하는 로컬 껍데기입니다. source만 지정하면 TO-BE/report/profile/server-source/verify-source를 자동 세팅하고, 실제 판정/자동수정 규칙은 배치파일과 동일합니다.
 - v5.4부터 rules\*.json / project-profile.public.sample.json 으로 다른 현장용 튜닝을 코드 수정 없이 할 수 있습니다.
 - 폐쇄망 반입 증빙: report\airgap_manifest.txt / airgap_manifest.json
 - 공개 배포 ZIP: node run-jquery35-v5.js --report ".\release" --mode release-zip
