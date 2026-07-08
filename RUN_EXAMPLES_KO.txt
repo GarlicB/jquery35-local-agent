@@ -37,11 +37,12 @@ jquery35-local-agent v5 - 명령 예시 모음
   -> report\ai_review_pack.txt 를 외부 AI에게 붙여넣고, 답변 JSON을 project-profile.json의
      learnedWrappers/learnedFindings 배열에 병합한 뒤 같은 명령을 다시 실행
   -> report\hermes_test_plan.md / hermes_review_matrix.csv 로 외부 AI 답변을 로컬에서 검수
+  -> report\hermes_testbench.html 로 CASE별 모킹 시험장 실행
 
 9-1) 외부 AI 질문보다 로컬 검수팩 의도를 강조하고 싶을 때:
   node run-jquery35-v5.js --source "C:\work\legacy-app" --report "C:\work\jquery35_report_v5" --mode hermes-pack
 
-10) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 78개 체크):
+10) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 82개 체크):
   node run-jquery35-v5.js --mode self-test
 
 유용한 옵션:

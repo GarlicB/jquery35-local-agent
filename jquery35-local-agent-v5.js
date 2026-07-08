@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.3.4";
+const TOOL_VERSION = "5.3.5";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -2996,7 +2996,7 @@ function writeIndexHtml(model) {
       model.reviewCases.slice(0, 20).map(function (g) {
         return [g.caseId, g.kind === "FN" ? "함수" : "패턴", g.name, g.fanout, g.count, g.findings[0].priority, trunc(g.question, 60)];
       })));
-    parts.push('<div class="small">--mode review-pack 또는 hermes-pack 실행 시 ai_review_pack.txt/json과 ' + reportLink("hermes_test_plan.md", "hermes_test_plan.md") + " / " + reportLink("hermes_review_matrix.csv", "hermes_review_matrix.csv") + '가 생성됩니다. 코드 원문 없이 함수명/앞뒤 몇 줄만 담겨 외부 AI에게 전달 가능하며, 로컬 검수 결과를 project-profile.json에 병합하면 다음 라운드에 분류가 반영됩니다.</div>');
+    parts.push('<div class="small">--mode review-pack 또는 hermes-pack 실행 시 ai_review_pack.txt/json과 ' + reportLink("hermes_test_plan.md", "hermes_test_plan.md") + " / " + reportLink("hermes_review_matrix.csv", "hermes_review_matrix.csv") + " / " + reportLink("hermes_testbench.html", "hermes_testbench.html") + '가 생성됩니다. 코드 원문 없이 함수명/앞뒤 몇 줄만 담겨 외부 AI에게 전달 가능하며, 로컬 검수 결과를 project-profile.json에 병합하면 다음 라운드에 분류가 반영됩니다.</div>');
   }
   parts.push("<h2>다음 액션</h2><ol>");
   recommendedActions(model).forEach(function (a) { parts.push("<li>" + htmlEsc(a) + "</li>"); });
@@ -3416,7 +3416,8 @@ function hermesCaseRecord(g, index) {
     profileAction: recipe.profileAction,
     safeAutomation: recipe.safeAutomation,
     roles: (recipe.roles || []).join("|"),
-    decisions: (recipe.decisions || []).join("|")
+    decisions: (recipe.decisions || []).join("|"),
+    excerpt: g.compactExcerpt || g.excerpt || ""
   };
 }
 
@@ -3450,6 +3451,34 @@ function hermesProfileTemplate(g, rec) {
     };
   }
   return tpl;
+}
+
+function writeHermesTestbench(model, records) {
+  const R = model.reportRoot;
+  const payload = {
+    tool: TOOL_NAME,
+    version: TOOL_VERSION,
+    round: model.reviewRound,
+    generatedAt: new Date().toISOString(),
+    sourceRoot: model.sourceRoot,
+    webContentRoot: model.webContentRoot,
+    counters: {
+      focusQueue: model.counters.FocusQueue,
+      manual: model.counters.Manual,
+      review: model.counters.Review,
+      xssHigh: model.counters.XssHigh
+    },
+    cases: records
+  };
+  writeUtf8(path.join(R, "hermes_testbench_data.json"), JSON.stringify(payload, null, 2) + "\n", false);
+
+  const H = [];
+  H.push("<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\"><title>Hermes Testbench</title><style>");
+  H.push("*{box-sizing:border-box}body{margin:0;background:#f2f5f8;color:#1f2937;font-family:'Malgun Gothic',AppleGothic,sans-serif}.wrap{max-width:1380px;margin:0 auto;padding:22px}.top{background:#fff;border:1px solid #d7dee8;border-radius:8px;padding:16px 18px;display:flex;justify-content:space-between;gap:14px}.eyebrow{font-size:11px;font-weight:800;color:#667085;text-transform:uppercase}.top h1{font-size:22px;margin:3px 0}.sub{font-size:12px;color:#667085;word-break:break-all}.grid{display:grid;grid-template-columns:330px minmax(0,1fr);gap:14px;margin-top:14px}.side,.main{background:#fff;border:1px solid #d7dee8;border-radius:8px}.side{padding:12px}.main{padding:14px}.caseBtn{width:100%;border:1px solid #d9e0ea;background:#fff;border-radius:7px;text-align:left;padding:9px;margin:0 0 7px;cursor:pointer}.caseBtn.active{border-color:#1a5fb4;background:#eef5ff}.caseBtn b{display:block;font-size:12px}.caseBtn span{display:block;color:#667085;font-size:11px;margin-top:3px}.pill{display:inline-block;border:1px solid #d7dee8;background:#f8fafc;border-radius:999px;padding:3px 8px;font-size:11px;margin:2px}.section{border-top:1px solid #e5ebf3;margin-top:12px;padding-top:12px}.kv{display:grid;grid-template-columns:130px 1fr;gap:6px 10px;font-size:12px}.kv div:nth-child(odd){font-weight:800;color:#475467}.code{background:#101828;color:#e5e7eb;border-radius:8px;padding:10px;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap;overflow:auto;max-height:220px}.arena{background:#f8fafc;border:1px solid #dbe3ee;border-radius:8px;padding:12px}.arena h3{margin:0 0 8px;font-size:14px}.controls{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}.controls button,.controls select,.controls input{font:12px inherit;border:1px solid #b9c4d3;border-radius:6px;background:#fff;padding:7px 9px}.out{border:1px solid #d7dee8;background:#fff;border-radius:8px;padding:10px;margin-top:8px;min-height:42px;font-size:12px}.status{font-weight:800}.ok{color:#166534}.warn{color:#b45309}.bad{color:#b42318}.split{display:grid;grid-template-columns:1fr 1fr;gap:10px}.mockBox{border:1px dashed #b9c4d3;border-radius:8px;padding:10px;min-height:64px;background:#fff}.small{font-size:12px;color:#667085}.copy{float:right}@media(max-width:900px){.grid,.split{grid-template-columns:1fr}.top{display:block}}");
+  H.push("</style></head><body><div class=\"wrap\"><section class=\"top\"><div><div class=\"eyebrow\">Hermes Local Testbench</div><h1>jQuery 취약점 검수 시험장</h1><div class=\"sub\">외부 통신 없이 report 폴더에서 실행되는 CASE별 모킹 페이지입니다. 실제 업무 화면 대체가 아니라 로컬 검수 기준을 재현하는 용도입니다.</div></div><div><span class=\"pill\">v" + htmlEsc(TOOL_VERSION) + "</span><span class=\"pill\">round " + htmlEsc(model.reviewRound) + "</span><span class=\"pill\">" + htmlEsc(records.length) + " cases</span></div></section><div class=\"grid\"><aside class=\"side\"><div class=\"small\">CASE 목록</div><div id=\"caseList\"></div></aside><main class=\"main\"><button class=\"copy\" type=\"button\" onclick=\"copyCaseJson()\">Copy Case JSON</button><div id=\"caseDetail\"></div><div class=\"section\"><div id=\"benchArena\" class=\"arena\"></div></div></main></div></div>");
+  H.push("<script>window.HERMES_TESTBENCH=" + scriptJson(payload) + ";\n(function(){var data=window.HERMES_TESTBENCH;var current=0;function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c];});}function byId(id){return document.getElementById(id);}function renderList(){var html='';data.cases.forEach(function(c,i){html+='<button type=\"button\" class=\"caseBtn '+(i===current?'active':'')+'\" onclick=\"selectCase('+i+')\"><b>'+esc(c.no+'. '+c.name)+'</b><span>'+esc(c.category+' / '+c.priority+' / '+c.locations)+'</span></button>';});byId('caseList').innerHTML=html||'<div class=\"small\">CASE 없음</div>';}function renderDetail(){var c=data.cases[current];if(!c){byId('caseDetail').innerHTML='<h2>CASE 없음</h2>';byId('benchArena').innerHTML='';return;}byId('caseDetail').innerHTML='<h2>'+esc(c.name)+'</h2><div><span class=\"pill\">'+esc(c.caseId)+'</span><span class=\"pill\">'+esc(c.category)+'</span><span class=\"pill\">'+esc(c.priority+'/'+c.confidence)+'</span><span class=\"pill\">fanout '+esc(c.fanout)+'</span></div><div class=\"section kv\"><div>위치</div><div>'+esc(c.locations)+'</div><div>질문</div><div>'+esc(c.question)+'</div><div>가설</div><div>'+esc(c.hypothesis)+'</div><div>정적 확인</div><div>'+esc(c.staticEvidence)+'</div><div>통과 기준</div><div>'+esc(c.passWhen)+'</div><div>실패 기준</div><div>'+esc(c.failWhen)+'</div></div><div class=\"section\"><div class=\"small\">redacted excerpt</div><pre class=\"code\">'+esc(c.excerpt)+'</pre></div>';renderArena(c);}function renderArena(c){if(c.category.indexOf('bool-attr')===0)return boolArena(c);if(c.category==='dom-sink'||c.category==='wrapper-dom-sink'||c.category==='dom-factory'||c.category==='parse-html')return domArena(c);if(c.category==='jqxhr-shorthand')return ajaxArena(c);if(c.category==='bind-to-on'||c.category==='unbind-to-off'||c.category==='live-die')return eventArena(c);return genericArena(c);}function boolArena(c){byId('benchArena').innerHTML='<h3>attr/prop 상태 시험장</h3><div class=\"small\">jQuery 없이 DOM attribute/property 차이를 재현합니다. 문자열 false가 위험한 이유를 확인하세요.</div><div class=\"controls\"><select id=\"boolVal\"><option>true</option><option>false</option><option>Y</option><option>N</option><option>1</option><option>0</option><option>\\\"false\\\"</option></select><button onclick=\"runBoolBench()\">Run</button></div><div class=\"split\"><div class=\"mockBox\"><button id=\"attrBtn\">AS-IS attr</button><div id=\"attrState\" class=\"small\"></div></div><div class=\"mockBox\"><button id=\"propBtn\">TO-BE prop</button><div id=\"propState\" class=\"small\"></div></div></div><div id=\"benchOut\" class=\"out\"></div>';runBoolBench();}window.runBoolBench=function(){var raw=byId('boolVal').value;var attrBtn=byId('attrBtn');var propBtn=byId('propBtn');attrBtn.removeAttribute('disabled');propBtn.disabled=false;if(raw==='false'||raw==='N'||raw==='0'){}else{attrBtn.setAttribute('disabled',raw.replace(/\\\"/g,''));}var bool=(raw==='true'||raw==='Y'||raw==='1');propBtn.disabled=bool;byId('attrState').textContent='has disabled attr='+attrBtn.hasAttribute('disabled')+' / disabled property='+attrBtn.disabled;byId('propState').textContent='disabled property='+propBtn.disabled;var risk=(raw==='\\\"false\\\"');byId('benchOut').innerHTML='<span class=\"status '+(risk?'bad':'ok')+'\">'+(risk?'주의':'확인')+'</span> 선택값 '+esc(raw)+' 기준. 문자열 false는 attribute가 존재하는 순간 비활성으로 해석될 수 있습니다.';};function domArena(c){byId('benchArena').innerHTML='<h3>DOM sink 모킹 시험장</h3><div class=\"small\">고정 무해 payload를 template에 파싱해 HTML 해석 여부를 봅니다. 스크립트는 실행하지 않습니다.</div><div class=\"controls\"><input id=\"domPayload\" value=\"&lt;b&gt;HERMES&lt;/b&gt;\" size=\"28\"><button onclick=\"runDomBench()\">Run</button></div><div class=\"split\"><div><b>.text() 방식</b><div id=\"textBox\" class=\"mockBox\"></div></div><div><b>HTML 파싱 감지</b><div id=\"htmlBox\" class=\"mockBox\"></div></div></div><div id=\"benchOut\" class=\"out\"></div>';runDomBench();}window.runDomBench=function(){var p=byId('domPayload').value;byId('textBox').textContent=p;var t=document.createElement('template');t.innerHTML=p;var tags=t.content.querySelectorAll('*').length;byId('htmlBox').textContent='parsed element count='+tags;byId('benchOut').innerHTML='<span class=\"status '+(tags?'bad':'ok')+'\">'+(tags?'HTML 가능':'텍스트성')+'</span> 태그가 파싱되면 서버/사용자 값 출처 확인 후 .text()/escape/sanitizer를 검토하세요.';};function ajaxArena(c){byId('benchArena').innerHTML='<h3>jqXHR callback 모킹 시험장</h3><div class=\"small\">성공/실패 흐름에서 콜백 첫 인자가 서버 데이터인지 확인하는 기준입니다.</div><div class=\"controls\"><button onclick=\"runAjaxBench(\\'success\\')\">Success</button><button onclick=\"runAjaxBench(\\'error\\')\">Error</button></div><div id=\"benchOut\" class=\"out\"></div>';runAjaxBench('success');}window.runAjaxBench=function(mode){var args=mode==='success'?['{result:\"OK\"}','success','jqXHR']:[ 'jqXHR','error','Thrown'];byId('benchOut').innerHTML='<b>'+esc(mode)+'</b> callback args: '+esc(args.join(' | '))+'<br>jqXHR shorthand면 .done/.fail/.always 전환 시 인자 순서가 유지되는지 화면 메시지를 확인하세요.';};function eventArena(c){byId('benchArena').innerHTML='<h3>event bind/off 모킹 시험장</h3><div class=\"small\">이벤트 등록/해제가 중복 실행이나 미실행을 만들지 않는지 확인합니다.</div><div class=\"controls\"><button onclick=\"addHandler()\">bind/on</button><button onclick=\"removeHandler()\">unbind/off</button><button id=\"eventTarget\">click target</button></div><div id=\"benchOut\" class=\"out\">count=0 handlers=0</div>';window._hCount=0;window._handlers=[];}window.addHandler=function(){var btn=byId('eventTarget');var h=function(){window._hCount++;byId('benchOut').textContent='count='+window._hCount+' handlers='+window._handlers.length;};window._handlers.push(h);btn.addEventListener('click',h);byId('benchOut').textContent='count='+window._hCount+' handlers='+window._handlers.length;};window.removeHandler=function(){var btn=byId('eventTarget');var h=window._handlers.pop();if(h)btn.removeEventListener('click',h);byId('benchOut').textContent='count='+window._hCount+' handlers='+window._handlers.length;};function genericArena(c){byId('benchArena').innerHTML='<h3>일반 검수 시험장</h3><div class=\"small\">이 유형은 자동 재현 대신 아래 기준으로 업무 화면에서 확인합니다.</div><div class=\"out\">'+esc(c.runtimeTest)+'</div>';}window.selectCase=function(i){current=i;renderList();renderDetail();};window.copyCaseJson=function(){var c=data.cases[current]||{};var txt=JSON.stringify(c,null,2);if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(txt);else window.prompt('copy',txt);};renderList();renderDetail();})();</script>");
+  H.push("</body></html>");
+  writeUtf8(path.join(R, "hermes_testbench.html"), H.join("\n"), false);
 }
 
 function writeHermesLocalPack(model) {
@@ -3522,11 +3551,12 @@ function writeHermesLocalPack(model) {
     sourceFingerprint: sourceFingerprint(model),
     totalAmbiguousGroups: model.reviewCasesAll,
     casesInPack: records.length,
-    files: ["hermes_test_plan.md", "hermes_review_matrix.csv", "hermes_profile_patch.sample.json"],
+    files: ["hermes_test_plan.md", "hermes_review_matrix.csv", "hermes_profile_patch.sample.json", "hermes_testbench.html", "hermes_testbench_data.json"],
     cases: records
   };
   writeUtf8(path.join(R, "hermes_local_report.json"), JSON.stringify(localReport, null, 2) + "\n", false);
-  log("hermes local pack: " + records.length + " case(s) -> hermes_test_plan.md / hermes_review_matrix.csv");
+  writeHermesTestbench(model, records);
+  log("hermes local pack: " + records.length + " case(s) -> hermes_test_plan.md / hermes_review_matrix.csv / hermes_testbench.html");
 }
 
 function writeReviewPack(model) {
@@ -4100,6 +4130,8 @@ function selfTest(opts) {
     check("ai_review_pack.json created", exists(path.join(rReview, "ai_review_pack.json")), "");
     check("hermes_test_plan.md created", exists(path.join(rReview, "hermes_test_plan.md")), "");
     check("hermes_review_matrix.csv created", exists(path.join(rReview, "hermes_review_matrix.csv")), "");
+    check("hermes_testbench.html created", exists(path.join(rReview, "hermes_testbench.html")), "");
+    check("hermes_testbench_data.json created", exists(path.join(rReview, "hermes_testbench_data.json")), "");
     check("hermes_profile_patch.sample.json created", exists(path.join(rReview, "hermes_profile_patch.sample.json")), "");
     const packTxt = readUtf8(path.join(rReview, "ai_review_pack.txt"));
     check("review pack has marker and at least one CASE", packTxt.indexOf("JQUERY35_AI_REVIEW_PACK") >= 0 && packTxt.indexOf("---- CASE 1/") >= 0, "");
@@ -4110,6 +4142,10 @@ function selfTest(opts) {
     check("hermes plan has local verification criteria", hermesPlan.indexOf("Hermes 로컬 검수팩") >= 0 && hermesPlan.indexOf("통과 기준") >= 0 && hermesPlan.indexOf("로컬 실행 테스트") >= 0, "");
     const hermesMatrix = readUtf8(path.join(rReview, "hermes_review_matrix.csv"));
     check("hermes matrix has evidence/test columns", hermesMatrix.indexOf("StaticEvidence") >= 0 && hermesMatrix.indexOf("RuntimeTest") >= 0 && hermesMatrix.indexOf("AllowedDecisions") >= 0, "");
+    const hermesBench = readUtf8(path.join(rReview, "hermes_testbench.html"));
+    check("hermes testbench has local mock arenas", hermesBench.indexOf("Hermes Local Testbench") >= 0 && hermesBench.indexOf("runDomBench") >= 0 && hermesBench.indexOf("runAjaxBench") >= 0, "");
+    const hermesBenchData = JSON.parse(readUtf8(path.join(rReview, "hermes_testbench_data.json")));
+    check("hermes testbench data mirrors cases", Array.isArray(hermesBenchData.cases) && hermesBenchData.cases.length === packJson.cases.length && hermesBenchData.files === undefined, "");
     const hermesPatch = JSON.parse(readUtf8(path.join(rReview, "hermes_profile_patch.sample.json")));
     check("hermes profile patch is template-only", hermesPatch.doNotMergeUnedited === true && Array.isArray(hermesPatch.templates) && hermesPatch.templates.length > 0 && hermesPatch.learnedWrappers.length === 0, "");
     check("hermes wrapper template uses one concrete role", !hermesPatch.templates.some(function (t) { return t.learnedWrapperTemplate && /\|/.test(t.learnedWrapperTemplate.role); }), "");
@@ -4126,7 +4162,7 @@ function selfTest(opts) {
     analyze(mHermes);
     writeAllReports(mHermes, {});
     writeReviewPack(mHermes);
-    check("hermes-pack alias writes local pack", exists(path.join(rHermes, "hermes_test_plan.md")) && exists(path.join(rHermes, "ai_review_pack.txt")), "");
+    check("hermes-pack alias writes local pack", exists(path.join(rHermes, "hermes_test_plan.md")) && exists(path.join(rHermes, "hermes_testbench.html")) && exists(path.join(rHermes, "ai_review_pack.txt")), "");
 
     const learnedCaseId = caseIdOf("FN", "renderCell");
     const overridePath = path.join(base, "learned-findings-profile.json");
