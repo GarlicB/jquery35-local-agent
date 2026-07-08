@@ -3,7 +3,7 @@
 **폐쇄망에서 Node.js 하나로 돌아가는 jQuery CVE-2020-11023 조치 자동화 도구**
 (레거시 Java/Spring/JSP 프로젝트용 · npm install 불필요 · 인터넷 불필요 · 외부 의존성 0)
 
-오래된 사내 웹(Spring 3.x + JSP + jQuery 1.x)에서 jQuery를 3.5+로 올려야 할 때 필요한 전 과정을 로컬에서 처리합니다:
+오래된 레거시 웹(Spring/JSP 계열 + jQuery 1.x)에서 jQuery를 3.5+로 올려야 할 때 필요한 전 과정을 로컬에서 처리합니다:
 **전수 정적분석 → 안전 자동수정(TO-BE 생성) → jQuery 3.5.1 + Migrate 교체 → 화면용 Runtime Probe → mock Lab 서버 → 운영 반영 전 게이트 검사 → 보고서**.
 
 ## 특징
@@ -14,7 +14,10 @@
 - **폐쇄망/구형 환경 대응** — Edge IE mode(개발자도구 제한)용 ES5 Runtime Probe, EUC-KR 파일 바이트 보존(latin1 round-trip), CSV/XLS 보고서를 npm 없이 직접 생성.
 - **AI 리뷰팩(review-pack)** — 애매한 코드 지점(함수명 + 앞뒤 몇 줄, 문자열/주석/정규식은 마스킹)만 골라 외부 AI와 스무고개처럼 반복 학습하는 루프. 회사 전용 공통 함수(AJAX 래퍼 등) 하나의 역할만 알아내면 그 지식이 호출부 전체에 전파됨. 학습된 지식은 절대 자동수정을 트리거하지 않고 분류에만 영향.
 - **Hermes 로컬 검수팩(hermes-pack)** — 외부 AI 질문과 별개로 각 CASE의 정적 확인 포인트, 로컬 Probe/Lab 테스트, 통과/실패 기준, project-profile 반영 템플릿, CASE별 모킹 시험장 웹페이지를 생성. 폐쇄망 안에서 반복 검수 지식을 쌓기 위한 부품팩.
-- **자체 검증 내장** — `--mode self-test`가 임시 샘플 프로젝트를 만들어 전체 사이클(82개 체크)을 검증. v5.3.5는 jQuery 3.5.1 안착 기준으로 필수 게이트와 jQuery 4 대비 저위험 항목을 분리합니다.
+- **공개 배포용 rulepack** — 웹루트 후보, Probe 삽입 힌트, 벤더 권고, mock 기본 응답을 `rules/*.json`으로 분리. 배포처마다 JS 코드를 고치지 않고 룰팩만 바꿔 튜닝합니다.
+- **Java/Spring 정적 증거** — Spring을 띄우지 않고 `@RequestMapping` 계열과 XML 설정을 읽어 `ajaxToServerMap.csv`, `serverEndpoints.csv`, `hermes_server_evidence.json`을 생성하고 mock route에 컨트롤러 힌트를 붙입니다.
+- **폐쇄망 배포 산출물** — `airgap_manifest.json/txt`로 무의존/무통신 증빙을 남기고, `--mode release-zip`으로 공개 배포용 ZIP을 생성합니다.
+- **자체 검증 내장** — `--mode self-test`가 임시 샘플 프로젝트를 만들어 전체 사이클(92개 체크)을 검증. v5.4.0은 jQuery 3.5.1 안착 기준에 공개 배포용 rulepack/airgap/release 흐름을 추가합니다.
 
 ## 빠른 시작
 
@@ -25,11 +28,17 @@ node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-a
 ```
 
 이후 `report\index.html` 대시보드를 열어 현황을 확인하고, `README_FIRST.txt`의 6단계 순서(분석 → 자동수정 → jQuery 교체 → Probe → Lab → verify-clean)를 따라가면 됩니다.
-Windows 사용자는 동봉된 `실행1_분석만.bat` ~ `실행6_운영반영전검증.bat`의 상단 경로만 수정해 실행하세요.
+Windows 사용자는 동봉된 `실행1_분석만.bat` ~ `실행9_배포ZIP생성.bat`의 상단 경로만 수정해 실행하세요.
+
+공개 배포/다른 현장 적용 시에는 `project-profile.public.sample.json`을 복사해 `project-profile.json`으로 만들고, 필요하면 `rules/public-defaults.json`, `rules/vendor-compat.json`, `rules/mock-defaults.json`만 수정하세요.
+
+```bat
+node run-jquery35-v5.js --report ".\release" --mode release-zip
+```
 
 ## 문서
 
-- [README_KO.md](README_KO.md) — 전체 매뉴얼 (판정 기준, 모드 설명, Bitbucket/Bamboo 플로우, FAQ)
+- [README_KO.md](README_KO.md) — 전체 매뉴얼 (판정 기준, 모드 설명, Git/CI 플로우, FAQ)
 - [VENDOR_COMPAT_KO.md](VENDOR_COMPAT_KO.md) — 벤더 호환성 브리프: jqGrid/jQuery UI/select2/autoNumeric의 jQuery 3.x 호환 버전, jQuery UI 자체 CVE, Migrate가 복원 못 하는 동작 변화(자기닫힘 태그 등)
 - [RUN_EXAMPLES_KO.txt](RUN_EXAMPLES_KO.txt) — 명령 예시 모음
 - [README_FIRST.txt](README_FIRST.txt) — 빠른 시작

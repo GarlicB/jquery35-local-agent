@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.3.5";
+const TOOL_VERSION = "5.4.0";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -17,7 +17,7 @@ const PROBE_MARKER = "JQUERY35_RUNTIME_PROBE";
 const PAGE_EXTS = [".jsp", ".jspx", ".html", ".htm", ".tag", ".tagx", ".inc", ".xhtml"];
 const TEXT_EXTS = PAGE_EXTS.concat([".js", ".css"]);
 const EXCLUDE_DIRS = Object.assign(Object.create(null), { ".git": 1, ".svn": 1, ".hg": 1, "node_modules": 1, "target": 1, "build": 1, "dist": 1, ".idea": 1, ".settings": 1 });
-const MODES = ["plan", "autofix", "patch-jquery", "probe", "lab", "verify-clean", "pr-report", "packet", "review-pack", "hermes-pack", "self-test"];
+const MODES = ["plan", "autofix", "patch-jquery", "probe", "lab", "verify-clean", "pr-report", "packet", "review-pack", "hermes-pack", "airgap-manifest", "release-zip", "self-test"];
 
 const DEFAULT_PATH_VARS = {
   "${js}": "/js",
@@ -39,6 +39,36 @@ const DEFAULT_VENDOR_PATTERNS = [
 
 const DEFAULT_APP_HINTS = ["js/util.js", "js/common.js"];
 const DEFAULT_IGNORE_ATTR_PATTERNS = ["aria-"];
+const DEFAULT_WEB_ROOT_CANDIDATES = ["WebContent", "src/main/webapp", "webapp", "web", "www", "wwwroot", "public"];
+const DEFAULT_WEB_ROOT_SIGNALS = ["WEB-INF", "META-INF", "js", "css", "resources", "static", "assets", "WEB-INF/views", "WEB-INF/layouts"];
+const DEFAULT_PROBE_HINTS = [
+  "WEB-INF/layouts/common_script_lib.jsp",
+  "WEB-INF/layouts/common.jsp",
+  "WEB-INF/jsp/common_script_lib.jsp",
+  "WEB-INF/views/common/script.jsp",
+  "WEB-INF/views/layout/common.jsp"
+];
+const DEFAULT_SERVER_SCAN = {
+  enabled: true,
+  sourceDirs: ["src/main/java", "src", "java"],
+  includeXml: true,
+  maxFileBytes: 1024 * 1024
+};
+const DEFAULT_MOCK_DEFAULTS = {
+  json: {
+    result: "OK",
+    success: true,
+    mock: true,
+    message: "jq35 local lab mock response",
+    rows: [
+      { col1: "SAMPLE1", col2: "100", col3: "Y" },
+      { col1: "SAMPLE2", col2: "200", col3: "N" }
+    ],
+    totalCount: 2
+  },
+  html: "<div class=\"jq35-mock\">MOCK HTML RESPONSE</div>",
+  text: "MOCK TEXT RESPONSE"
+};
 const BOOL_ATTRS = Object.assign(Object.create(null), { disabled: 1, readonly: 1, checked: 1, selected: 1 });
 
 const TAINT_NAMES = Object.create(null);
@@ -72,6 +102,95 @@ function positiveIntOpt(raw, def) { const n = parseInt(raw, 10); return (Number.
 function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function htmlEsc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function xmlEsc(s) { return htmlEsc(s).replace(/'/g, "&apos;").replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ""); }
+function jsonClone(v) { return JSON.parse(JSON.stringify(v)); }
+function isPlainObject(v) { return v && typeof v === "object" && !Array.isArray(v); }
+
+function mergeConfig(base, extra) {
+  if (!isPlainObject(extra)) return base;
+  Object.keys(extra).forEach(function (k) {
+    if (Array.isArray(extra[k])) base[k] = extra[k].slice();
+    else if (isPlainObject(extra[k])) {
+      if (!isPlainObject(base[k])) base[k] = {};
+      mergeConfig(base[k], extra[k]);
+    } else {
+      base[k] = extra[k];
+    }
+  });
+  return base;
+}
+
+function readJsonMaybe(file, required) {
+  if (!file || !exists(file)) {
+    if (required) throw new Error("json file not found: " + file);
+    return null;
+  }
+  try {
+    return JSON.parse(readUtf8(file).replace(/^\uFEFF/, ""));
+  } catch (e) {
+    if (required) throw new Error("json parse failed: " + file + " - " + e.message);
+    warn("json parse failed, skipped: " + file + " - " + e.message);
+    return null;
+  }
+}
+
+function emptyRulepack() {
+  return {
+    webRootCandidates: DEFAULT_WEB_ROOT_CANDIDATES.slice(),
+    webRootSignals: DEFAULT_WEB_ROOT_SIGNALS.slice(),
+    pathVariables: Object.assign({}, DEFAULT_PATH_VARS),
+    vendorPatterns: DEFAULT_VENDOR_PATTERNS.slice(),
+    appScriptHints: DEFAULT_APP_HINTS.slice(),
+    ignoreAttrPatterns: DEFAULT_IGNORE_ATTR_PATTERNS.slice(),
+    probe: { injectTargetHints: DEFAULT_PROBE_HINTS.slice() },
+    serverScan: jsonClone(DEFAULT_SERVER_SCAN),
+    mockDefaults: jsonClone(DEFAULT_MOCK_DEFAULTS),
+    vendorRecommendations: {},
+    files: []
+  };
+}
+
+function mergeRulepackFile(pack, file, required) {
+  const raw = readJsonMaybe(file, required);
+  if (!raw) return;
+  mergeConfig(pack, raw);
+  if (pack.files.indexOf(file) < 0) pack.files.push(file);
+}
+
+function mergeRulepackDir(pack, dir, required) {
+  if (!dir || !isDir(dir)) {
+    if (required) throw new Error("rulepack directory not found: " + dir);
+    return;
+  }
+  ["public-defaults.json", "vendor-compat.json", "mock-defaults.json"].forEach(function (name) {
+    const file = path.join(dir, name);
+    if (exists(file)) mergeRulepackFile(pack, file, false);
+  });
+}
+
+function loadRulepack(opts, sourceRoot) {
+  const pack = emptyRulepack();
+  const defaultDir = path.join(__dirname, "rules");
+  mergeRulepackDir(pack, defaultDir, false);
+  let custom = opts.rulepack || "";
+  if (!custom && sourceRoot && exists(path.join(sourceRoot, "jquery35-rulepack.json"))) custom = path.join(sourceRoot, "jquery35-rulepack.json");
+  if (!custom && sourceRoot && isDir(path.join(sourceRoot, "jquery35-rulepack"))) custom = path.join(sourceRoot, "jquery35-rulepack");
+  if (custom) {
+    const p = path.resolve(custom);
+    if (isDir(p)) mergeRulepackDir(pack, p, true);
+    else mergeRulepackFile(pack, p, true);
+    log("rulepack loaded: " + p);
+  }
+  pack.webRootCandidates = uniq((pack.webRootCandidates || []).concat([pack.webContentDir || "WebContent"])).filter(Boolean);
+  pack.webRootSignals = uniq(pack.webRootSignals || DEFAULT_WEB_ROOT_SIGNALS);
+  pack.vendorPatterns = uniq(pack.vendorPatterns || DEFAULT_VENDOR_PATTERNS);
+  pack.appScriptHints = uniq(pack.appScriptHints || DEFAULT_APP_HINTS);
+  pack.ignoreAttrPatterns = uniq(pack.ignoreAttrPatterns || DEFAULT_IGNORE_ATTR_PATTERNS);
+  pack.probe = pack.probe || {};
+  pack.probe.injectTargetHints = uniq(pack.probe.injectTargetHints || DEFAULT_PROBE_HINTS);
+  pack.mockDefaults = mergeConfig(jsonClone(DEFAULT_MOCK_DEFAULTS), pack.mockDefaults || {});
+  pack.serverScan = mergeConfig(jsonClone(DEFAULT_SERVER_SCAN), pack.serverScan || {});
+  return pack;
+}
 
 function csvCell(v) {
   let s = String(v == null ? "" : v);
@@ -391,13 +510,17 @@ function isMinifiedFile(rel, text) {
   return maxLen > 3000;
 }
 
-function defaultProfile() {
+function defaultProfile(rulepack) {
+  rulepack = rulepack || emptyRulepack();
   return {
     webContentDir: "WebContent",
-    pathVariables: Object.assign({}, DEFAULT_PATH_VARS),
-    vendorPatterns: DEFAULT_VENDOR_PATTERNS.slice(),
-    appScriptHints: DEFAULT_APP_HINTS.slice(),
-    ignoreAttrPatterns: DEFAULT_IGNORE_ATTR_PATTERNS.slice(),
+    webRootCandidates: (rulepack.webRootCandidates || DEFAULT_WEB_ROOT_CANDIDATES).slice(),
+    webRootSignals: (rulepack.webRootSignals || DEFAULT_WEB_ROOT_SIGNALS).slice(),
+    pathVariables: Object.assign({}, rulepack.pathVariables || DEFAULT_PATH_VARS),
+    vendorPatterns: (rulepack.vendorPatterns || DEFAULT_VENDOR_PATTERNS).slice(),
+    vendorRecommendations: Object.assign({}, rulepack.vendorRecommendations || {}),
+    appScriptHints: (rulepack.appScriptHints || DEFAULT_APP_HINTS).slice(),
+    ignoreAttrPatterns: (rulepack.ignoreAttrPatterns || DEFAULT_IGNORE_ATTR_PATTERNS).slice(),
     jquery: {
       targetVersion: DEFAULT_JQUERY_VERSION,
       migrateVersion: DEFAULT_MIGRATE_VERSION,
@@ -409,8 +532,11 @@ function defaultProfile() {
     },
     probe: {
       enabled: true,
-      injectTargetHints: ["WEB-INF/layouts/common_script_lib.jsp"]
+      injectTargetHints: ((rulepack.probe && rulepack.probe.injectTargetHints) || DEFAULT_PROBE_HINTS).slice()
     },
+    serverScan: mergeConfig(jsonClone(DEFAULT_SERVER_SCAN), rulepack.serverScan || {}),
+    mockDefaults: mergeConfig(jsonClone(DEFAULT_MOCK_DEFAULTS), rulepack.mockDefaults || {}),
+    rulepackFiles: (rulepack.files || []).slice(),
     learnedWrappers: [],
     learnedFindings: [],
     sensitiveIdentifiers: []
@@ -418,7 +544,8 @@ function defaultProfile() {
 }
 
 function loadProfile(opts, sourceRoot) {
-  const prof = defaultProfile();
+  const rulepack = loadRulepack(opts, sourceRoot);
+  const prof = defaultProfile(rulepack);
   let profPath = "";
   if (opts.profile) profPath = opts.profile;
   else if (sourceRoot && exists(path.join(sourceRoot, "project-profile.json"))) profPath = path.join(sourceRoot, "project-profile.json");
@@ -427,12 +554,17 @@ function loadProfile(opts, sourceRoot) {
     try {
       const raw = JSON.parse(readUtf8(profPath).replace(/^\uFEFF/, ""));
       if (raw.webContentDir) prof.webContentDir = raw.webContentDir;
+      if (Array.isArray(raw.webRootCandidates)) prof.webRootCandidates = raw.webRootCandidates;
+      if (Array.isArray(raw.webRootSignals)) prof.webRootSignals = raw.webRootSignals;
       if (raw.pathVariables) Object.assign(prof.pathVariables, raw.pathVariables);
-      if (Array.isArray(raw.vendorPatterns)) prof.vendorPatterns = raw.vendorPatterns.concat(["resources/jqgrid/"]);
+      if (Array.isArray(raw.vendorPatterns)) prof.vendorPatterns = raw.vendorPatterns;
+      if (raw.vendorRecommendations) Object.assign(prof.vendorRecommendations, raw.vendorRecommendations);
       if (Array.isArray(raw.appScriptHints)) prof.appScriptHints = raw.appScriptHints;
       if (Array.isArray(raw.ignoreAttrPatterns)) prof.ignoreAttrPatterns = raw.ignoreAttrPatterns;
       if (raw.jquery) Object.assign(prof.jquery, raw.jquery);
       if (raw.probe) Object.assign(prof.probe, raw.probe);
+      if (raw.serverScan) Object.assign(prof.serverScan, raw.serverScan);
+      if (raw.mockDefaults) prof.mockDefaults = mergeConfig(prof.mockDefaults, raw.mockDefaults);
       if (Array.isArray(raw.learnedWrappers)) prof.learnedWrappers = prof.learnedWrappers.concat(raw.learnedWrappers);
       if (Array.isArray(raw.learnedFindings)) prof.learnedFindings = prof.learnedFindings.concat(raw.learnedFindings);
       if (Array.isArray(raw.sensitiveIdentifiers)) prof.sensitiveIdentifiers = raw.sensitiveIdentifiers;
@@ -450,11 +582,17 @@ function loadProfile(opts, sourceRoot) {
     prof.jquery.migrateFile = "jquery-migrate-" + opts["migrate-version"] + ".min.js";
   }
   if (opts["migrate-trace"]) prof.jquery.migrateTrace = true;
+  if (opts["server-source"]) prof.serverScan.sourceOverride = opts["server-source"];
+  if (opts["no-server-scan"]) prof.serverScan.enabled = false;
   prof.appScriptHints = prof.appScriptHints.map(function (s) { return toPosix(s).toLowerCase(); });
+  prof.webRootCandidates = uniq([prof.webContentDir].concat(prof.webRootCandidates || [])).filter(Boolean);
+  prof.webRootSignals = uniq(prof.webRootSignals || DEFAULT_WEB_ROOT_SIGNALS);
+  prof.vendorPatterns = uniq(prof.vendorPatterns || DEFAULT_VENDOR_PATTERNS);
+  prof.ignoreAttrPatterns = uniq(prof.ignoreAttrPatterns || DEFAULT_IGNORE_ATTR_PATTERNS);
   return prof;
 }
 
-const BOOL_FLAGS = { "audit-only": 1, "inject-probe": 1, "patch-jquery": 1, "migrate-trace": 1, "no-lab": 1, "self-test": 1, "include-snippets": 1, "warn-as-error": 1, "help": 1 };
+const BOOL_FLAGS = { "audit-only": 1, "inject-probe": 1, "patch-jquery": 1, "migrate-trace": 1, "no-lab": 1, "no-server-scan": 1, "self-test": 1, "include-snippets": 1, "warn-as-error": 1, "help": 1 };
 
 function parseArgs(argv) {
   const opts = { _: [] };
@@ -504,6 +642,8 @@ function helpText() {
     "                meant to be copy-pasted to an external AI and iterated on",
     "  hermes-pack   review-pack + local verification plan/matrix/profile templates",
     "                for air-gapped review without network calls",
+    "  airgap-manifest analyze + write airgap_manifest.json/txt only",
+    "  release-zip   create public distribution zip from this tool directory",
     "  self-test     build a sample project in temp dir and validate the tool end-to-end",
     "",
     "Options:",
@@ -514,6 +654,9 @@ function helpText() {
     "  --port <n>                lab server port (default 18080)",
     "  --profile <file>          project-profile.json path (also carries learnedWrappers/",
     "                            learnedFindings from a previous review-pack round)",
+    "  --rulepack <dir|json>      override public defaults/vendor/mock rules",
+    "  --server-source <dir>      optional Java/Spring source root for server evidence",
+    "  --no-server-scan          skip Java/Spring static evidence extraction",
     "  --jquery-version <v>      default " + DEFAULT_JQUERY_VERSION,
     "  --migrate-version <v>     default " + DEFAULT_MIGRATE_VERSION,
     "  --inject-probe            also inject probe in autofix/patch-jquery mode",
@@ -535,10 +678,28 @@ function helpText() {
 }
 
 function detectWebContent(sourceRoot, profile) {
-  const cand1 = path.join(sourceRoot, profile.webContentDir);
-  if (isDir(cand1) && isDir(path.join(cand1, "WEB-INF"))) return cand1;
-  if (isDir(cand1)) return cand1;
-  const own = ["WEB-INF", "js", "css", "resources"];
+  const candidates = uniq([profile.webContentDir].concat(profile.webRootCandidates || DEFAULT_WEB_ROOT_CANDIDATES)).filter(Boolean);
+  let best = { path: "", score: -1 };
+  function scoreRoot(abs) {
+    if (!isDir(abs)) return -1;
+    let score = 0;
+    (profile.webRootSignals || DEFAULT_WEB_ROOT_SIGNALS).forEach(function (d) {
+      if (isDir(path.join(abs, d))) score += d.indexOf("/") >= 0 ? 3 : 1;
+    });
+    if (isDir(path.join(abs, "WEB-INF"))) score += 5;
+    if (exists(path.join(abs, "WEB-INF", "web.xml"))) score += 3;
+    if (isDir(path.join(abs, "js")) || isDir(path.join(abs, "static"))) score += 1;
+    return score;
+  }
+  candidates.forEach(function (rel) {
+    const abs = rel === "." ? sourceRoot : path.join(sourceRoot, rel);
+    const score = scoreRoot(abs);
+    if (score > best.score) best = { path: abs, score: score };
+  });
+  const ownScore = scoreRoot(sourceRoot);
+  if (ownScore > best.score) best = { path: sourceRoot, score: ownScore };
+  if (best.path && best.score >= 1) return best.path;
+  const own = profile.webRootSignals || DEFAULT_WEB_ROOT_SIGNALS;
   let hit = 0;
   own.forEach(function (d) { if (isDir(path.join(sourceRoot, d))) hit++; });
   if (hit >= 1 && isDir(path.join(sourceRoot, "WEB-INF"))) return sourceRoot;
@@ -546,7 +707,7 @@ function detectWebContent(sourceRoot, profile) {
   const names = isDir(sourceRoot) ? fs.readdirSync(sourceRoot) : [];
   for (let i = 0; i < names.length; i++) {
     const c = path.join(sourceRoot, names[i]);
-    if (isDir(c) && isDir(path.join(c, "WEB-INF"))) return c;
+    if (isDir(c) && scoreRoot(c) >= 3) return c;
   }
   return "";
 }
@@ -1470,7 +1631,7 @@ function buildModel(opts, mode) {
   if (!isDir(sourceRoot)) throw new Error("source directory not found: " + sourceRoot);
   const profile = loadProfile(opts, sourceRoot);
   const webContentRoot = detectWebContent(sourceRoot, profile);
-  if (!webContentRoot) throw new Error("WebContent could not be detected under: " + sourceRoot + " (expected <source>/WebContent or <source> containing WEB-INF)");
+  if (!webContentRoot) throw new Error("web root could not be detected under: " + sourceRoot + " (configure webRootCandidates/webRootSignals in project-profile.json or --rulepack)");
   const targetRoot = opts.target ? path.resolve(opts.target) : "";
   const reportRoot = opts.report ? path.resolve(opts.report) : "";
   if (targetRoot) {
@@ -1486,6 +1647,7 @@ function buildModel(opts, mode) {
     pageScriptRows: [], pageCssRows: [], includeRows: [], unresolvedRows: [],
     effectiveRows: [], oldCoreRefs: [], jqueryLoadRows: [],
     ajaxRows: [], syntaxRows: [], probeInjections: [], patchResults: [],
+    serverFiles: [], serverEndpointRows: [], serverEvidenceRows: [], ajaxServerRows: [],
     changed: {}, editWarnings: [], git: null, counters: {}, focus: [],
     scriptInv: [], pluginInv: [], dirInv: [], completeRows: [], needsRows: [],
     wrapperRules: Object.create(null), wrapperNames: [], safeWrapperNames: Object.create(null),
@@ -1552,6 +1714,7 @@ function analyze(model) {
   applyLearnedFindingsOverrides(model);
   analyzePages(model);
   analyzeAjax(model);
+  analyzeServerEvidence(model);
   analyzeSyntax(model);
   buildInventories(model);
   dedupFindings(model);
@@ -1852,6 +2015,314 @@ function normalizeAjaxUrl(u, model) {
   return s;
 }
 
+function readTextLoose(abs) {
+  const buf = fs.readFileSync(abs);
+  let s = buf.toString("utf8");
+  if (s.indexOf("\uFFFD") >= 0) s = buf.toString("latin1");
+  return s;
+}
+
+function stripJavaComments(text) {
+  return text.replace(/\/\*[\s\S]*?\*\//g, function (m) {
+    return m.replace(/[^\r\n]/g, " ");
+  }).replace(/\/\/[^\r\n]*/g, "");
+}
+
+function countChar(s, ch) {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) if (s[i] === ch) n++;
+  return n;
+}
+
+function annotationName(ann) {
+  const m = /^\s*@([A-Za-z0-9_$.]+)/.exec(ann || "");
+  return m ? m[1].split(".").pop() : "";
+}
+
+function quotedStrings(s) {
+  const out = [];
+  const re = /"([^"]*)"|'([^']*)'/g;
+  let m;
+  while ((m = re.exec(s || "")) !== null) out.push(m[1] !== undefined ? m[1] : m[2]);
+  return out;
+}
+
+function mappingPaths(ann) {
+  const named = [];
+  const namedRe = /\b(?:value|path)\s*=\s*(?:\{([^}]*)\}|(["'][\s\S]*?["']))/g;
+  let m;
+  while ((m = namedRe.exec(ann || "")) !== null) quotedStrings(m[1] || m[2] || "").forEach(function (s) { named.push(s); });
+  const qs = named.length > 0 ? named : quotedStrings(ann);
+  const paths = qs.filter(function (s) { return /^\/|\.do$|^[A-Za-z0-9_${]/.test(s || ""); });
+  return paths.length > 0 ? paths : [""];
+}
+
+function mappingMethods(ann) {
+  const name = annotationName(ann);
+  const fixed = { GetMapping: "GET", PostMapping: "POST", PutMapping: "PUT", DeleteMapping: "DELETE", PatchMapping: "PATCH" };
+  if (fixed[name]) return [fixed[name]];
+  const out = [];
+  const re = /RequestMethod\s*\.\s*([A-Z]+)/g;
+  let m;
+  while ((m = re.exec(ann || "")) !== null) out.push(m[1]);
+  const methodAttr = /\bmethod\s*=\s*(["'])([A-Za-z]+)\1/.exec(ann || "");
+  if (methodAttr) out.push(methodAttr[2].toUpperCase());
+  return out.length > 0 ? uniq(out) : ["ANY"];
+}
+
+function parseMappingAnnotations(annotations) {
+  const out = [];
+  (annotations || []).forEach(function (ann) {
+    const name = annotationName(ann);
+    if (!/^(RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)$/.test(name)) return;
+    const paths = mappingPaths(ann);
+    const methods = mappingMethods(ann);
+    paths.forEach(function (p) {
+      methods.forEach(function (m) {
+        out.push({ path: p || "", method: m, annotation: name });
+      });
+    });
+  });
+  return out;
+}
+
+function joinUrlPath(a, b) {
+  a = String(a || "").trim();
+  b = String(b || "").trim();
+  if (!a && !b) return "/";
+  const s = ("/" + [a, b].filter(Boolean).join("/")).replace(/\/+/g, "/");
+  return s.length > 1 && s.slice(-1) === "/" ? s.slice(0, -1) : s;
+}
+
+function extractJavaParams(signature) {
+  const params = [];
+  const re = /@(RequestParam|PathVariable)(?:\s*\(([^)]*)\))?[\s\S]*?\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:,|\))/g;
+  let m;
+  while ((m = re.exec(signature || "")) !== null) {
+    const q = quotedStrings(m[2] || "");
+    params.push((m[1] === "PathVariable" ? "path:" : "query:") + (q[0] || m[3]));
+  }
+  return uniq(params);
+}
+
+function collectJavaAnnotationsAndMethods(text) {
+  const lines = text.split(/\r?\n/);
+  const items = [];
+  let pending = [];
+  let ann = null;
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const trim = raw.trim();
+    if (ann) {
+      ann.text += " " + trim;
+      ann.depth += countChar(trim, "(") - countChar(trim, ")");
+      if (ann.depth <= 0) { pending.push(ann.text); ann = null; }
+      continue;
+    }
+    if (/^@[A-Za-z0-9_$.]+/.test(trim)) {
+      ann = { text: trim, line: i + 1, depth: countChar(trim, "(") - countChar(trim, ")") };
+      if (ann.depth <= 0) { pending.push(ann.text); ann = null; }
+      continue;
+    }
+    if (!trim) continue;
+    const classM = /\b(?:class|interface)\s+([A-Za-z_$][A-Za-z0-9_$]*)/.exec(trim);
+    if (classM) {
+      items.push({ type: "class", name: classM[1], line: i + 1, annotations: pending.slice() });
+      pending = [];
+      continue;
+    }
+    const sig = lines.slice(i, Math.min(lines.length, i + 6)).join(" ");
+    const methM = /\b(public|protected|private)\s+(?:static\s+)?[\w<>\[\],.?]+\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(([\s\S]*?)\)\s*(?:throws\s+[^{]+)?\{/.exec(sig);
+    if (methM) {
+      items.push({ type: "method", name: methM[2], line: i + 1, signature: methM[0], annotations: pending.slice() });
+      pending = [];
+      continue;
+    }
+    if (trim.charAt(0) !== "@") pending = [];
+  }
+  return items;
+}
+
+function serverScanRoots(model) {
+  const cfg = model.profile.serverScan || {};
+  const roots = [];
+  if (cfg.sourceOverride) roots.push(path.resolve(cfg.sourceOverride));
+  (cfg.sourceDirs || DEFAULT_SERVER_SCAN.sourceDirs).forEach(function (rel) {
+    const abs = path.isAbsolute(rel) ? rel : path.join(model.sourceRoot, rel);
+    if (isDir(abs)) roots.push(abs);
+  });
+  roots.push(model.sourceRoot);
+  return uniq(roots.map(function (p) { return path.resolve(p); })).filter(isDir);
+}
+
+function javaRel(model, abs) {
+  return toPosix(path.relative(model.sourceRoot, abs));
+}
+
+function scanJavaController(model, abs) {
+  const cfg = model.profile.serverScan || {};
+  let text;
+  try { text = stripJavaComments(readTextLoose(abs)); } catch (e) { return; }
+  if (text.length > (cfg.maxFileBytes || DEFAULT_SERVER_SCAN.maxFileBytes)) return;
+  const rel = javaRel(model, abs);
+  model.serverFiles.push({ rel: rel, type: "java", size: text.length });
+  const pkgM = /\bpackage\s+([A-Za-z0-9_.]+)\s*;/.exec(text);
+  const pkg = pkgM ? pkgM[1] : "";
+  const items = collectJavaAnnotationsAndMethods(text);
+  let className = fileNameOf(rel).replace(/\.java$/i, "");
+  let classMappings = [{ path: "", method: "ANY" }];
+  let classAnnotations = [];
+  items.forEach(function (it) {
+    if (it.type === "class") {
+      className = it.name;
+      classAnnotations = it.annotations || [];
+      const maps = parseMappingAnnotations(classAnnotations);
+      classMappings = maps.length > 0 ? maps : [{ path: "", method: "ANY" }];
+      if (classAnnotations.some(function (a) { return /@(Controller|RestController)\b/.test(a); })) {
+        model.serverEvidenceRows.push([rel, it.line, "controller-class", pkg ? pkg + "." + className : className, classMappings.map(function (m) { return m.path; }).join("|")]);
+      }
+      return;
+    }
+    if (it.type !== "method") return;
+    const methodMappings = parseMappingAnnotations(it.annotations || []);
+    if (methodMappings.length === 0) return;
+    const responseBody = classAnnotations.some(function (a) { return /@RestController\b/.test(a); }) ||
+      (it.annotations || []).some(function (a) { return /@ResponseBody\b/.test(a); });
+    const params = extractJavaParams(it.signature);
+    classMappings.forEach(function (cm) {
+      methodMappings.forEach(function (mm) {
+        const httpMethod = mm.method !== "ANY" ? mm.method : cm.method;
+        const route = joinUrlPath(cm.path, mm.path);
+        model.serverEndpointRows.push({
+          rel: rel,
+          line: it.line,
+          httpMethod: httpMethod || "ANY",
+          path: route,
+          className: pkg ? pkg + "." + className : className,
+          methodName: it.name,
+          responseBody: responseBody ? "Y" : "N",
+          params: params.join("|"),
+          evidence: mm.annotation
+        });
+      });
+    });
+  });
+}
+
+function scanServerXml(model, abs) {
+  const cfg = model.profile.serverScan || {};
+  if (cfg.includeXml === false) return;
+  let text;
+  try { text = readTextLoose(abs); } catch (e) { return; }
+  if (text.length > (cfg.maxFileBytes || DEFAULT_SERVER_SCAN.maxFileBytes)) return;
+  const rel = javaRel(model, abs);
+  model.serverFiles.push({ rel: rel, type: "xml", size: text.length });
+  const compRe = /<context:component-scan\b[^>]*\bbase-package\s*=\s*["']([^"']+)["'][^>]*>/g;
+  let m;
+  while ((m = compRe.exec(text)) !== null) {
+    model.serverEvidenceRows.push([rel, lineOf(lineStartsOf(text), m.index), "component-scan", m[1], ""]);
+  }
+  if (/<mvc:annotation-driven\b/i.test(text)) {
+    model.serverEvidenceRows.push([rel, 1, "mvc-annotation-driven", "Y", ""]);
+  }
+  const viewRe = /<property\b[^>]*\bname\s*=\s*["'](prefix|suffix)["'][^>]*\bvalue\s*=\s*["']([^"']*)["'][^>]*>/g;
+  while ((m = viewRe.exec(text)) !== null) {
+    model.serverEvidenceRows.push([rel, lineOf(lineStartsOf(text), m.index), "view-resolver-" + m[1], m[2], ""]);
+  }
+}
+
+function serverPathKey(s) {
+  let out = applyPathVars(String(s || ""), { pathVariables: DEFAULT_PATH_VARS });
+  out = out.replace(/\$\{[^}]*\}/g, "").replace(/<%=?[^%]*%>/g, "");
+  out = out.split(/[?#]/)[0].trim();
+  if (!out) return "";
+  if (!/^\//.test(out)) out = "/" + out;
+  out = out.replace(/\/+/g, "/");
+  if (out.length > 1 && out.slice(-1) === "/") out = out.slice(0, -1);
+  return out.toLowerCase();
+}
+
+function routePatternRe(route) {
+  const esc = escapeRe(serverPathKey(route)).replace(/\\\{[^}]+\\\}/g, "[^/]+").replace(/\\\*/g, ".*");
+  return new RegExp("^" + esc + "$", "i");
+}
+
+function mapAjaxToServer(model) {
+  const endpoints = model.serverEndpointRows || [];
+  model.ajaxRows.forEach(function (a) {
+    const url = serverPathKey(a.urlNorm);
+    if (!url || url.indexOf("_el_") >= 0 || url.indexOf("_jsp_") >= 0) return;
+    let best = null;
+    endpoints.forEach(function (e) {
+      const ep = serverPathKey(e.path);
+      if (!ep) return;
+      const methodOk = e.httpMethod === "ANY" || e.httpMethod === a.method || a.method === "GET" && e.httpMethod === "ANY";
+      let score = methodOk ? 20 : 0;
+      let why = methodOk ? "method" : "method-mismatch";
+      if (ep === url) { score += 80; why += "+exact"; }
+      else if (routePatternRe(ep).test(url)) { score += 70; why += "+pattern"; }
+      else if (url.slice(-ep.length) === ep || ep.slice(-url.length) === url) { score += 45; why += "+suffix"; }
+      else if (url.replace(/\.do$/i, "") === ep.replace(/\.do$/i, "")) { score += 60; why += "+do"; }
+      if (!best || score > best.score) best = { endpoint: e, score: score, why: why };
+    });
+    if (best && best.score >= 60) {
+      const e = best.endpoint;
+      model.ajaxServerRows.push({
+        rel: a.rel,
+        line: a.line,
+        ajaxMethod: a.method,
+        ajaxUrl: a.urlNorm,
+        matched: "Y",
+        serverMethod: e.httpMethod,
+        serverPath: e.path,
+        handler: e.className + "#" + e.methodName,
+        evidenceFile: e.rel,
+        evidenceLine: e.line,
+        confidence: best.score >= 90 ? "High" : "Medium",
+        note: best.why
+      });
+    } else {
+      model.ajaxServerRows.push({
+        rel: a.rel,
+        line: a.line,
+        ajaxMethod: a.method,
+        ajaxUrl: a.urlNorm,
+        matched: "N",
+        serverMethod: "",
+        serverPath: "",
+        handler: "",
+        evidenceFile: "",
+        evidenceLine: "",
+        confidence: "Low",
+        note: "no static Spring mapping matched"
+      });
+    }
+  });
+}
+
+function analyzeServerEvidence(model) {
+  const cfg = model.profile.serverScan || {};
+  if (cfg.enabled === false || model.opts["no-server-scan"]) return;
+  const excl = [];
+  if (model.targetRoot) excl.push(model.targetRoot);
+  if (model.reportRoot) excl.push(model.reportRoot);
+  const seen = Object.create(null);
+  serverScanRoots(model).forEach(function (root) {
+    walkFiles(root, excl).forEach(function (f) {
+      const abs = path.resolve(f.abs);
+      if (seen[abs]) return;
+      seen[abs] = 1;
+      const ext = path.extname(f.abs).toLowerCase();
+      if (ext === ".java") scanJavaController(model, f.abs);
+      else if (ext === ".xml") scanServerXml(model, f.abs);
+    });
+  });
+  mapAjaxToServer(model);
+  if (model.serverEndpointRows.length > 0 || model.serverEvidenceRows.length > 0) {
+    log("server evidence: endpoints=" + model.serverEndpointRows.length + " evidence=" + model.serverEvidenceRows.length + " ajaxMapped=" + model.ajaxServerRows.filter(function (r) { return r.matched === "Y"; }).length);
+  }
+}
+
 function analyzeSyntax(model) {
   model.textFiles.forEach(function (ctx) {
     if (!ctx.isJs) return;
@@ -1913,7 +2384,8 @@ function buildInventories(model) {
       else if (min) risk = "MINIFIED";
       model.scriptInv.push([f.rel, lib, ver, lib !== "app" ? "Y" : "N", min ? "Y" : "N", risk]);
       if (lib !== "app" && lib !== "probe") {
-        model.pluginInv.push([f.rel, lib, ver, "path/filename pattern", lib === "jquery-core" && risk ? "High" : "Medium", VENDOR_RECOMMEND[lib] || VENDOR_RECOMMEND["vendor-other"]]);
+        const recs = model.profile.vendorRecommendations || {};
+        model.pluginInv.push([f.rel, lib, ver, "path/filename pattern", lib === "jquery-core" && risk ? "High" : "Medium", recs[lib] || VENDOR_RECOMMEND[lib] || recs["vendor-other"] || VENDOR_RECOMMEND["vendor-other"]]);
       }
     }
   });
@@ -2291,6 +2763,9 @@ function summarize(model) {
     PageRiskMigrateBeforeCore: model.pages.filter(function (p) { return p.riskMigrateBeforeCore; }).length,
     UnresolvedRefs: model.unresolvedRows.length,
     AjaxEndpoints: model.ajaxRows.length,
+    ServerFiles: model.serverFiles.length,
+    ServerEndpoints: model.serverEndpointRows.length,
+    AjaxMappedToServer: model.ajaxServerRows.filter(function (r) { return r.matched === "Y"; }).length,
     JsSyntaxFail: model.syntaxRows.filter(function (r) { return r.result === "FAIL"; }).length,
     LibraryCounts: JSON.stringify(libCounts),
     GitInfo: model.git && model.git.available ? (model.git.branch + " changed=" + model.git.changed.length + " untracked=" + model.git.untracked.length) : "Unavailable",
@@ -2687,6 +3162,22 @@ function writeCsvReports(model) {
   writeCsv(path.join(R, "ajaxEndpoints.csv"),
     ["RelativePath", "LineNumber", "MethodGuess", "UrlRaw", "UrlNormalized", "Dynamic", "Confidence", "MockRecommendation"],
     model.ajaxRows.map(function (r) { return [r.rel, r.line, r.method, r.urlRaw, r.urlNorm, r.dynamic, r.confidence, r.mock]; }));
+  writeCsv(path.join(R, "serverEndpoints.csv"),
+    ["RelativePath", "LineNumber", "HttpMethod", "RoutePath", "ControllerClass", "ControllerMethod", "ResponseBody", "Params", "Evidence"],
+    model.serverEndpointRows.map(function (r) { return [r.rel, r.line, r.httpMethod, r.path, r.className, r.methodName, r.responseBody, r.params, r.evidence]; }));
+  writeCsv(path.join(R, "serverEvidence.csv"),
+    ["RelativePath", "LineNumber", "EvidenceType", "Value", "Detail"],
+    model.serverEvidenceRows);
+  writeCsv(path.join(R, "ajaxToServerMap.csv"),
+    ["RelativePath", "LineNumber", "AjaxMethod", "AjaxUrl", "Matched", "ServerMethod", "ServerPath", "Handler", "EvidenceFile", "EvidenceLine", "Confidence", "Note"],
+    model.ajaxServerRows.map(function (r) { return [r.rel, r.line, r.ajaxMethod, r.ajaxUrl, r.matched, r.serverMethod, r.serverPath, r.handler, r.evidenceFile, r.evidenceLine, r.confidence, r.note]; }));
+  writeUtf8(path.join(R, "hermes_server_evidence.json"), JSON.stringify({
+    generated: true,
+    serverFiles: model.serverFiles,
+    endpoints: model.serverEndpointRows,
+    evidence: model.serverEvidenceRows,
+    ajaxToServer: model.ajaxServerRows
+  }, null, 2) + "\n", false);
   writeCsv(path.join(R, "jsSyntax.csv"), ["RelativePath", "Result", "Reason"],
     model.syntaxRows.map(function (r) { return [r.rel, r.result, r.reason]; }));
   writeCsv(path.join(R, "completeByAutoFix.csv"),
@@ -2734,6 +3225,10 @@ function writeXls(model) {
     model.pages.slice(0, 2000).map(function (p) { return [p.rel, p.effectiveScripts, p.coreCount, p.coreVer, p.oldCore ? "Y" : "N", p.hasMigrate ? "Y" : "N", p.migrateAfter]; })));
   sheets.push(xlsSheet("PluginInventory", ["RelativePath", "Library", "Version", "RiskLevel", "Recommendation"],
     model.pluginInv.slice(0, 1000).map(function (r) { return [r[0], r[1], r[2], r[4], r[5]]; })));
+  sheets.push(xlsSheet("ServerEndpoints", ["RelativePath", "Line", "Method", "Route", "Handler", "ResponseBody"],
+    model.serverEndpointRows.slice(0, 2000).map(function (r) { return [r.rel, r.line, r.httpMethod, r.path, r.className + "#" + r.methodName, r.responseBody]; })));
+  sheets.push(xlsSheet("AjaxToServer", ["RelativePath", "Line", "Ajax", "Matched", "Handler", "Confidence"],
+    model.ajaxServerRows.slice(0, 2000).map(function (r) { return [r.rel, r.line, r.ajaxMethod + " " + r.ajaxUrl, r.matched, r.handler, r.confidence]; })));
   const doc = ['<?xml version="1.0" encoding="UTF-8"?>',
     '<?mso-application progid="Excel.Sheet"?>',
     '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">',
@@ -2986,6 +3481,14 @@ function writeIndexHtml(model) {
   const riskPages = model.pages.filter(function (p) { return p.riskMultiCore || p.riskOldCore || p.riskMigrateMissing || p.riskMigrateBeforeCore; });
   parts.push(tableHtml(["페이지", "core 수", "버전", "구버전", "Migrate", "Migrate 순서"],
     riskPages.map(function (p) { return [p.rel, p.coreCount, p.coreVer, p.oldCore ? "Y" : "", p.hasMigrate ? "Y" : "누락", p.migrateAfter]; })));
+  if (model.serverEndpointRows.length > 0 || model.ajaxServerRows.length > 0) {
+    parts.push("<h2>서버 정적 증거</h2>");
+    parts.push(tableHtml(["AJAX", "매핑", "핸들러", "근거"],
+      model.ajaxServerRows.slice(0, 30).map(function (r) {
+        return [r.ajaxMethod + " " + r.ajaxUrl, r.matched, r.handler || "-", r.evidenceFile ? (r.evidenceFile + ":" + r.evidenceLine) : r.note];
+      })));
+    parts.push('<div class="small">Java/Spring을 실행하지 않고 어노테이션/XML만 읽은 보조 근거입니다. 상세: ' + reportLink("serverEndpoints.csv", "serverEndpoints.csv") + " / " + reportLink("ajaxToServerMap.csv", "ajaxToServerMap.csv") + " / " + reportLink("hermes_server_evidence.json", "hermes_server_evidence.json") + "</div>");
+  }
   parts.push("<h2>라이브러리 분포</h2>");
   let lc = {};
   try { lc = JSON.parse(c.LibraryCounts); } catch (e) { }
@@ -3001,7 +3504,7 @@ function writeIndexHtml(model) {
   parts.push("<h2>다음 액션</h2><ol>");
   recommendedActions(model).forEach(function (a) { parts.push("<li>" + htmlEsc(a) + "</li>"); });
   parts.push("</ol></div></details>");
-  parts.push('<div class="small">상세 데이터: apiFindings.csv / focusQueue.csv / jspPages.csv / pageScriptEffective.csv / jquery35_report.xls</div>');
+  parts.push('<div class="small">상세 데이터: apiFindings.csv / focusQueue.csv / jspPages.csv / pageScriptEffective.csv / ajaxToServerMap.csv / airgap_manifest.txt / jquery35_report.xls</div>');
   parts.push("</main>");
   parts.push('<div id="focusDetailModal" class="modalBackdrop" onclick="if(event.target===this) closeFocusDetail();"><div class="modalBox"><div class="modalHead"><div id="focusModalTitle" class="modalTitle"></div><button type="button" class="modalClose" onclick="closeFocusDetail()">Close</button></div><div class="modalBody"><div id="focusModalInfo" class="infoGrid"></div><div class="detailGrid"><div class="pane"><h3>AS-IS</h3><div id="focusAsIs"></div></div><div class="pane"><h3>TO-BE</h3><div id="focusToBe"></div></div></div></div></div></div>');
   parts.push("<script>window.__JQ35_FOCUS_DETAILS__=" + scriptJson(modalDetails) + ";\n(function(){function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c];});}function block(sn){if(!sn||!sn.available){return '<div class=\"noteBox\">'+esc(sn&&sn.note?sn.note:'not available')+'</div>';}return sn.rows.map(function(r){return '<div class=\"codeLine '+(r.hit?'hit':'')+'\"><span class=\"ln\">'+esc(r.n)+'</span><span class=\"txt\">'+esc(r.text)+'</span></div>';}).join('');}window.openFocusDetail=function(i){var d=window.__JQ35_FOCUS_DETAILS__[i];if(!d)return;document.getElementById('focusModalTitle').textContent='#'+d.rank+' '+d.rel+':'+d.line;document.getElementById('focusModalInfo').innerHTML='<div>목록</div><div>'+esc(d.sourceKind)+'</div><div>TO-BE 상태</div><div>'+esc(d.toBeStatus)+'</div><div>유형</div><div>'+esc(d.category)+' / '+esc(d.priority)+' / '+esc(d.confidence)+'</div><div>패턴</div><div>'+esc(d.pattern)+'</div><div>왜 문제인가</div><div>'+esc(d.reason)+'</div><div>어떻게 바꾸나</div><div>'+esc(d.change)+'</div><div>확인할 것</div><div>'+esc(d.verify)+'</div>';document.getElementById('focusAsIs').innerHTML=block(d.asIs);document.getElementById('focusToBe').innerHTML=block(d.toBe);document.getElementById('focusDetailModal').style.display='block';};window.closeFocusDetail=function(){document.getElementById('focusDetailModal').style.display='none';};document.addEventListener('keydown',function(e){if(e.key==='Escape')closeFocusDetail();});})();</script>");
@@ -3034,7 +3537,7 @@ function packetLines(model) {
     "ChangedFiles", "ApiFindings", "Critical", "AutoFixed", "AutoInferred", "Review", "Manual", "XssHigh", "FocusQueue",
     "VendorReview", "StaticHtmlLow", "JqueryLoads", "OldJqueryBelow350", "PageRiskMultipleJqueryCore",
     "PageRiskOldJqueryCore", "PageRiskMigrateMissing", "PageRiskMigrateBeforeCore", "UnresolvedRefs", "AjaxEndpoints", "JsSyntaxFail",
-    "ReviewCasesTotal", "ReviewCasesInPack", "LearnedWrapperCount", "LearnedFindingOverrides",
+    "ServerFiles", "ServerEndpoints", "AjaxMappedToServer", "ReviewCasesTotal", "ReviewCasesInPack", "LearnedWrapperCount", "LearnedFindingOverrides",
     "LibraryCounts", "GitInfo", "OldJquerySrcs"].forEach(function (k) {
       L.push(k + "=" + c[k]);
     });
@@ -3061,6 +3564,11 @@ function packetLines(model) {
   L.push("");
   L.push("TopAjaxEndpoints:");
   uniq(model.ajaxRows.map(function (r) { return r.method + " " + r.urlNorm; })).slice(0, 30).forEach(function (u) { L.push("  " + u); });
+  L.push("");
+  L.push("TopServerEndpointEvidence:");
+  model.ajaxServerRows.filter(function (r) { return r.matched === "Y"; }).slice(0, 30).forEach(function (r) {
+    L.push("  " + r.ajaxMethod + " " + r.ajaxUrl + " -> " + r.handler + " (" + r.evidenceFile + ":" + r.evidenceLine + ")");
+  });
   L.push("");
   L.push("TopPluginInventory:");
   uniq(model.pluginInv.map(function (r) { return r[1] + (r[2] ? " v" + r[2] : ""); })).slice(0, 20).forEach(function (p) { L.push("  " + p); });
@@ -3096,6 +3604,7 @@ function writeChatSummary(model) {
   L.push("- 벤더 검토(VendorReview): " + c.VendorReview + "건 (jqGrid/jquery-ui/select2/autoNumeric 등, 직접 수정 금지)");
   L.push("- 정적 HTML 저위험: " + c.StaticHtmlLow + "건 (조치 불필요 후보)");
   L.push("- 사람이 봐야 할 FocusQueue: " + c.FocusQueue + "건");
+  L.push("- 서버 정적 증거: Java/XML " + c.ServerFiles + "개 파일, Controller endpoint " + c.ServerEndpoints + "건, AJAX 매핑 " + c.AjaxMappedToServer + "/" + c.AjaxEndpoints + "건");
   L.push("");
   L.push("페이지 리스크");
   L.push("- jQuery core 중복 로드 페이지: " + c.PageRiskMultipleJqueryCore);
@@ -3117,20 +3626,28 @@ function writeChatSummary(model) {
 
 function writeMockFiles(model) {
   const routes = {};
+  const serverByAjax = {};
+  (model.ajaxServerRows || []).forEach(function (r) {
+    if (r.matched === "Y") serverByAjax[r.ajaxMethod + " " + r.ajaxUrl] = r;
+  });
   model.ajaxRows.forEach(function (r) {
     if (!r.urlNorm || r.urlNorm.indexOf("_EL_") >= 0 || r.urlNorm.indexOf("_JSP_") >= 0) return;
     const key = r.urlNorm;
     if (!routes[key]) routes[key] = { url: key, method: r.method, type: r.mock, hits: 0 };
     routes[key].hits++;
     if (r.mock === "json") routes[key].type = "json";
+    const ev = serverByAjax[r.method + " " + r.urlNorm];
+    if (ev) {
+      routes[key].serverMatched = true;
+      routes[key].handler = ev.handler;
+      routes[key].serverPath = ev.serverPath;
+      routes[key].evidence = ev.evidenceFile + ":" + ev.evidenceLine;
+      routes[key].confidence = ev.confidence;
+    }
   });
   const routeArr = Object.keys(routes).sort().map(function (k) { return routes[k]; });
   writeUtf8(path.join(model.reportRoot, "mock_routes.json"), JSON.stringify({ generated: true, routes: routeArr }, null, 2), false);
-  const sample = {
-    json: { result: "OK", success: true, mock: true, message: "jq35 local lab mock response", rows: [{ col1: "SAMPLE1", col2: "100", col3: "Y" }, { col1: "SAMPLE2", col2: "200", col3: "N" }], totalCount: 2 },
-    html: "<div class=\"jq35-mock\">MOCK HTML RESPONSE</div>",
-    text: "MOCK TEXT RESPONSE"
-  };
+  const sample = mergeConfig(jsonClone(DEFAULT_MOCK_DEFAULTS), model.profile.mockDefaults || {});
   writeUtf8(path.join(model.reportRoot, "mock_data_default.json"), JSON.stringify(sample, null, 2), false);
 }
 
@@ -3196,13 +3713,13 @@ function writePrReport(model) {
   L.push("## 운영 반영 전 체크");
   L.push("- [ ] Runtime Probe script 제거 (verify-clean 모드 FAIL 항목)");
   L.push("- [ ] verify-clean 모드 통과 (구버전 jQuery 잔존 0건)");
-  L.push("- [ ] Bamboo branch build 성공");
+  L.push("- [ ] CI branch build 성공");
   L.push("");
   L.push("생성: " + TOOL_NAME + " v" + TOOL_VERSION);
   writeUtf8(path.join(model.reportRoot, "pr_description.md"), L.join("\n") + "\n", true);
 
   const B = [];
-  B.push("# Bamboo / 배포 체크리스트");
+  B.push("# CI / 배포 체크리스트");
   B.push("");
   B.push("- [ ] fix/jquery-cve-2020-11023 브랜치에서 branch build 성공");
   B.push("- [ ] 배포 대상 환경 확인 (개발 -> 검증 -> 운영 순서)");
@@ -3212,6 +3729,7 @@ function writePrReport(model) {
   B.push("- [ ] jquery-1.10.2.min.js 파일 삭제 또는 참조 0건 확인");
   B.push("- [ ] Migrate 콘솔 경고 잔존 여부 기록");
   B.push("- [ ] 롤백 계획: 이전 커밋 revert + 캐시 무효화");
+  writeUtf8(path.join(model.reportRoot, "ci_checklist.md"), B.join("\n") + "\n", true);
   writeUtf8(path.join(model.reportRoot, "bamboo_checklist.md"), B.join("\n") + "\n", true);
 }
 
@@ -3241,10 +3759,13 @@ function writeSampleProfile(model) {
   const p = path.join(model.reportRoot, "project-profile.sample.json");
   writeUtf8(p, JSON.stringify({
     webContentDir: "WebContent",
-    pathVariables: DEFAULT_PATH_VARS,
-    vendorPatterns: ["resources/jqgrid/", "jquery-ui", "jquery.ui", "select2", "autoNumeric", "jqgrid", "jquery.jqGrid", "grid.locale"],
-    appScriptHints: ["js/util.js", "js/common.js"],
-    ignoreAttrPatterns: ["aria-"],
+    webRootCandidates: model.profile.webRootCandidates,
+    webRootSignals: model.profile.webRootSignals,
+    pathVariables: model.profile.pathVariables,
+    vendorPatterns: model.profile.vendorPatterns,
+    vendorRecommendations: model.profile.vendorRecommendations,
+    appScriptHints: model.profile.appScriptHints,
+    ignoreAttrPatterns: model.profile.ignoreAttrPatterns,
     jquery: {
       targetVersion: DEFAULT_JQUERY_VERSION,
       migrateVersion: DEFAULT_MIGRATE_VERSION,
@@ -3254,7 +3775,9 @@ function writeSampleProfile(model) {
       newMigrateSrc: "",
       migrateTrace: false
     },
-    probe: { enabled: true, injectTargetHints: ["WEB-INF/layouts/common_script_lib.jsp"] },
+    probe: { enabled: true, injectTargetHints: model.profile.probe.injectTargetHints },
+    serverScan: model.profile.serverScan,
+    mockDefaults: model.profile.mockDefaults,
     learnedWrappers: [],
     learnedFindings: [],
     sensitiveIdentifiers: []
@@ -3614,6 +4137,220 @@ function writeReviewPack(model) {
   log("review pack: " + model.reviewCases.length + "/" + model.reviewCasesAll + " ambiguous groups (round " + model.reviewRound + ")");
 }
 
+function sha256File(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
+function releaseCandidateFiles() {
+  const root = __dirname;
+  const files = [
+    "jquery35-local-agent-v5.js",
+    "run-jquery35-v5.js",
+    "README.md",
+    "README_KO.md",
+    "README_FIRST.txt",
+    "RUN_EXAMPLES_KO.txt",
+    "VENDOR_COMPAT_KO.md",
+    "LICENSE",
+    "project-profile.sample.json",
+    "project-profile.public.sample.json",
+    "실행1_분석만.bat",
+    "실행2_TO_BE_자동수정.bat",
+    "실행3_jquery교체시도.bat",
+    "실행4_프로브포함.bat",
+    "실행5_로컬랩서버.bat",
+    "실행6_운영반영전검증.bat",
+    "실행7_AI리뷰팩.bat",
+    "실행8_폐쇄망증빙.bat",
+    "실행9_배포ZIP생성.bat"
+  ];
+  const rulesDir = path.join(root, "rules");
+  if (isDir(rulesDir)) {
+    fs.readdirSync(rulesDir).sort().forEach(function (name) {
+      if (/\.json$/i.test(name)) files.push("rules/" + name);
+    });
+  }
+  return files.filter(function (rel) { return exists(path.join(root, rel.split("/").join(path.sep))); });
+}
+
+function fileManifestRows(files) {
+  return files.map(function (rel) {
+    const abs = path.join(__dirname, rel.split("/").join(path.sep));
+    const st = fs.statSync(abs);
+    return { path: rel, bytes: st.size, sha256: sha256File(abs) };
+  });
+}
+
+function writeAirgapManifest(model) {
+  const releaseFiles = releaseCandidateFiles();
+  const manifest = {
+    tool: TOOL_NAME,
+    version: TOOL_VERSION,
+    generatedAt: new Date().toISOString(),
+    sourceRoot: model ? model.sourceRoot : "",
+    webContentRoot: model ? model.webContentRoot : "",
+    reportRoot: model ? model.reportRoot : "",
+    jqueryTargetVersion: model ? model.profile.jquery.targetVersion : DEFAULT_JQUERY_VERSION,
+    airgapAssertions: {
+      npmDependencies: "none",
+      nodeModulesRequired: false,
+      nodeBuiltinsOnly: ["fs", "path", "http", "crypto", "child_process", "os"],
+      outboundNetworkCalls: "none; lab mode serves only local mock pages and probe receiver",
+      labBindAddress: "127.0.0.1",
+      cdnRequired: false,
+      generatedHtmlCdnRequired: false,
+      writesSourceTree: "never; target/report only"
+    },
+    rulepackFiles: model ? (model.profile.rulepackFiles || []).map(function (f) {
+      return { path: f, sha256: exists(f) ? sha256File(f) : "" };
+    }) : [],
+    reportCounters: model ? {
+      totalFiles: model.counters.TotalFiles,
+      apiFindings: model.counters.ApiFindings,
+      focusQueue: model.counters.FocusQueue,
+      serverEndpoints: model.counters.ServerEndpoints,
+      ajaxMappedToServer: model.counters.AjaxMappedToServer
+    } : {},
+    releaseFiles: fileManifestRows(releaseFiles)
+  };
+  const R = model && model.reportRoot ? model.reportRoot : path.join(process.cwd(), "release");
+  ensureDir(R);
+  writeUtf8(path.join(R, "airgap_manifest.json"), JSON.stringify(manifest, null, 2) + "\n", false);
+  const L = [];
+  L.push("AIRGAP MANIFEST " + TOOL_NAME + " v" + TOOL_VERSION);
+  L.push("generatedAt=" + manifest.generatedAt);
+  L.push("nodeModulesRequired=false");
+  L.push("npmDependencies=none");
+  L.push("outboundNetworkCalls=none");
+  L.push("labBindAddress=127.0.0.1");
+  L.push("releaseFiles=" + manifest.releaseFiles.length);
+  L.push("rulepackFiles=" + manifest.rulepackFiles.length);
+  if (model) {
+    L.push("sourceRoot=" + model.sourceRoot);
+    L.push("webContentRoot=" + model.webContentRoot);
+    L.push("serverEndpoints=" + model.counters.ServerEndpoints);
+    L.push("ajaxMappedToServer=" + model.counters.AjaxMappedToServer + "/" + model.counters.AjaxEndpoints);
+  }
+  L.push("");
+  L.push("FILES");
+  manifest.releaseFiles.forEach(function (f) { L.push(f.sha256 + "  " + f.path + "  " + f.bytes + " bytes"); });
+  writeUtf8(path.join(R, "airgap_manifest.txt"), L.join("\r\n") + "\r\n", true);
+  return manifest;
+}
+
+let CRC32_TABLE = null;
+function crc32(buf) {
+  if (!CRC32_TABLE) {
+    CRC32_TABLE = [];
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      CRC32_TABLE[n] = c >>> 0;
+    }
+  }
+  let crc = 0 ^ -1;
+  for (let i = 0; i < buf.length; i++) crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ buf[i]) & 0xFF];
+  return (crc ^ -1) >>> 0;
+}
+
+function dosDateTime(d) {
+  const year = Math.max(1980, d.getFullYear());
+  const time = (d.getHours() << 11) | (d.getMinutes() << 5) | Math.floor(d.getSeconds() / 2);
+  const date = ((year - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  return { time: time, date: date };
+}
+
+function zipHeaderLocal(nameBuf, data, crc, dt) {
+  const h = Buffer.alloc(30);
+  h.writeUInt32LE(0x04034b50, 0);
+  h.writeUInt16LE(20, 4);
+  h.writeUInt16LE(0x0800, 6);
+  h.writeUInt16LE(0, 8);
+  h.writeUInt16LE(dt.time, 10);
+  h.writeUInt16LE(dt.date, 12);
+  h.writeUInt32LE(crc, 14);
+  h.writeUInt32LE(data.length, 18);
+  h.writeUInt32LE(data.length, 22);
+  h.writeUInt16LE(nameBuf.length, 26);
+  h.writeUInt16LE(0, 28);
+  return h;
+}
+
+function zipHeaderCentral(nameBuf, data, crc, dt, offset) {
+  const h = Buffer.alloc(46);
+  h.writeUInt32LE(0x02014b50, 0);
+  h.writeUInt16LE(20, 4);
+  h.writeUInt16LE(20, 6);
+  h.writeUInt16LE(0x0800, 8);
+  h.writeUInt16LE(0, 10);
+  h.writeUInt16LE(dt.time, 12);
+  h.writeUInt16LE(dt.date, 14);
+  h.writeUInt32LE(crc, 16);
+  h.writeUInt32LE(data.length, 20);
+  h.writeUInt32LE(data.length, 24);
+  h.writeUInt16LE(nameBuf.length, 28);
+  h.writeUInt16LE(0, 30);
+  h.writeUInt16LE(0, 32);
+  h.writeUInt16LE(0, 34);
+  h.writeUInt16LE(0, 36);
+  h.writeUInt32LE(0, 38);
+  h.writeUInt32LE(offset, 42);
+  return h;
+}
+
+function writeZip(zipFile, entries) {
+  const parts = [];
+  const centrals = [];
+  let offset = 0;
+  const now = dosDateTime(new Date());
+  entries.forEach(function (e) {
+    const nameBuf = Buffer.from(e.name, "utf8");
+    const data = Buffer.isBuffer(e.data) ? e.data : Buffer.from(String(e.data), "utf8");
+    const crc = crc32(data);
+    const local = zipHeaderLocal(nameBuf, data, crc, now);
+    parts.push(local, nameBuf, data);
+    centrals.push(zipHeaderCentral(nameBuf, data, crc, now, offset), nameBuf);
+    offset += local.length + nameBuf.length + data.length;
+  });
+  const centralStart = offset;
+  let centralSize = 0;
+  centrals.forEach(function (b) { centralSize += b.length; });
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralSize, 12);
+  end.writeUInt32LE(centralStart, 16);
+  end.writeUInt16LE(0, 20);
+  ensureDir(path.dirname(zipFile));
+  fs.writeFileSync(zipFile, Buffer.concat(parts.concat(centrals).concat([end])));
+}
+
+function writeReleaseZip(opts) {
+  const outDir = path.resolve(opts.report || path.join(process.cwd(), "release"));
+  ensureDir(outDir);
+  const files = releaseCandidateFiles();
+  const manifest = {
+    tool: TOOL_NAME,
+    version: TOOL_VERSION,
+    generatedAt: new Date().toISOString(),
+    airgap: { npmDependencies: "none", nodeModulesRequired: false, outboundNetworkCalls: "none" },
+    files: fileManifestRows(files)
+  };
+  const entries = files.map(function (rel) {
+    const abs = path.join(__dirname, rel.split("/").join(path.sep));
+    return { name: TOOL_NAME + "-" + TOOL_VERSION + "/" + rel, data: fs.readFileSync(abs) };
+  });
+  entries.push({ name: TOOL_NAME + "-" + TOOL_VERSION + "/airgap_release_manifest.json", data: JSON.stringify(manifest, null, 2) + "\n" });
+  const zipFile = path.join(outDir, TOOL_NAME + "-v" + TOOL_VERSION + "-public.zip");
+  writeZip(zipFile, entries);
+  writeUtf8(path.join(outDir, "airgap_release_manifest.json"), JSON.stringify(manifest, null, 2) + "\n", false);
+  log("release zip written: " + zipFile + " (" + entries.length + " entries)");
+  return zipFile;
+}
+
 function writeAllReports(model, extra) {
   ensureDir(model.reportRoot);
   writeCsvReports(model);
@@ -3624,11 +4361,12 @@ function writeAllReports(model, extra) {
   writeSampleProfile(model);
   writeRuntimeChecklist(model);
   writeRecommendedCommits(model);
+  writeAirgapManifest(model);
   if (!model.opts["no-lab"]) writeMockFiles(model);
   if (extra && extra.pr) writePrReport(model);
   log("report written: " + model.reportRoot);
   log("  - index.html (dashboard), summary.csv, apiFindings.csv, focusQueue.csv, jquery35_report.xls");
-  log("  - assistant_packet.txt / chat_summary.txt (safe to share externally)");
+  log("  - assistant_packet.txt / chat_summary.txt / airgap_manifest.txt");
 }
 const MIME = {
   ".html": "text/html", ".htm": "text/html", ".js": "application/javascript",
@@ -3718,9 +4456,10 @@ function startLab(model, opts) {
       routes[r.urlNorm] = { type: r.mock, method: r.method };
     }
   });
+  const mockDefaults = mergeConfig(jsonClone(DEFAULT_MOCK_DEFAULTS), model.profile.mockDefaults || {});
   const mock = {
-    json: JSON.stringify({ result: "OK", success: true, mock: true, message: "jq35 local lab mock response", rows: [{ col1: "SAMPLE1", col2: "100", col3: "Y" }, { col1: "SAMPLE2", col2: "200", col3: "N" }], totalCount: 2 }),
-    html: '<div class="jq35-mock">MOCK HTML RESPONSE</div>'
+    json: JSON.stringify(mockDefaults.json),
+    html: String(mockDefaults.html || DEFAULT_MOCK_DEFAULTS.html)
   };
   const probeJs = genProbeJs();
   const server = http.createServer(function (req, res) {
@@ -3957,6 +4696,33 @@ const ST_WRAPPER_JS = [
   ""
 ].join("\r\n");
 
+const ST_CONTROLLER_JAVA = [
+  "package com.example.sample;",
+  "",
+  "import org.springframework.stereotype.Controller;",
+  "import org.springframework.web.bind.annotation.PostMapping;",
+  "import org.springframework.web.bind.annotation.RequestMapping;",
+  "import org.springframework.web.bind.annotation.ResponseBody;",
+  "",
+  "@Controller",
+  "@RequestMapping(\"/sample\")",
+  "public class SampleController {",
+  "  @PostMapping(\"/list.do\")",
+  "  @ResponseBody",
+  "  public Object list() { return null; }",
+  "}",
+  ""
+].join("\n");
+
+const ST_SPRING_XML = [
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+  "<beans xmlns:context=\"http://www.springframework.org/schema/context\" xmlns:mvc=\"http://www.springframework.org/schema/mvc\">",
+  "  <context:component-scan base-package=\"com.example.sample\" />",
+  "  <mvc:annotation-driven />",
+  "</beans>",
+  ""
+].join("\n");
+
 function selfTest(opts) {
   const base = path.join(os.tmpdir(), "jq35-selftest-" + Date.now());
   const src = path.join(base, "sample-app");
@@ -3971,6 +4737,8 @@ function selfTest(opts) {
   writeLatin1(path.join(wc, "js", "jquery-ui-1.10.4.min.js"), "/*! jQuery UI 1.10.4 fixture */");
   writeLatin1(path.join(wc, "resources", "jqgrid", "js", "jquery.jqGrid.min.js"), ST_JQGRID_JS);
   writeLatin1(path.join(wc, "css", "common.css"), ".a{color:#000}");
+  writeUtf8(path.join(src, "src", "main", "java", "com", "example", "sample", "SampleController.java"), ST_CONTROLLER_JAVA, false);
+  writeUtf8(path.join(src, "src", "main", "webapp", "WEB-INF", "spring", "mvc.xml"), ST_SPRING_XML, false);
   const results = [];
   const check = function (name, ok, detail) {
     results.push({ name: name, ok: !!ok, detail: detail || "" });
@@ -3994,15 +4762,19 @@ function selfTest(opts) {
     check("staticHtmlLow >= 1 (append option literal)", c1.StaticHtmlLow >= 1, "got " + c1.StaticHtmlLow);
     check("vendorReview >= 1 (jqgrid fixture)", c1.VendorReview >= 1, "got " + c1.VendorReview);
     check("focusQueue > 0", c1.FocusQueue > 0, "got " + c1.FocusQueue);
+    check("server endpoint detected from Java annotation", c1.ServerEndpoints >= 1 && m1.serverEndpointRows.some(function (r) { return r.path === "/sample/list.do" && r.httpMethod === "POST"; }), JSON.stringify(m1.serverEndpointRows));
+    check("ajax mapped to server endpoint", c1.AjaxMappedToServer >= 1 && m1.ajaxServerRows.some(function (r) { return r.matched === "Y" && r.handler.indexOf("SampleController#list") >= 0; }), JSON.stringify(m1.ajaxServerRows));
     const trimPlanFinding = m1.findings.find(function (f) { return f.rel === "js/util.js" && f.category === "trim-deprecated"; });
     check("trim-deprecated deferred for 3.5.1 landing",
       !!trimPlanFinding && trimPlanFinding.priority === "StaticHtmlLow" && trimPlanFinding.action === "Ignored" && !m1.focus.some(function (f) { return f.category === "trim-deprecated"; }),
       trimPlanFinding ? JSON.stringify([trimPlanFinding.priority, trimPlanFinding.action]) : "finding not found");
     check("effective include resolved (list.jsp sees layout core)", m1.pages.some(function (p) { return p.rel.indexOf("views/sample/list.jsp") >= 0 && p.oldCore && p.effectiveScripts >= 3; }), "");
     check("function-bind not touched (onRow.bind)", !m1.findings.some(function (f) { return f.rel === "js/util.js" && f.category === "bind-to-on" && f.action === "Changed" && f.line >= 16; }), "");
-    ["summary.csv", "apiFindings.csv", "focusQueue.csv", "critical.csv", "xssHigh.csv", "assistant_packet.txt", "chat_summary.txt", "index.html", "jquery35_report.xls", "jspPages.csv", "pageScriptEffective.csv", "ajaxEndpoints.csv", "mock_routes.json"].forEach(function (f) {
+    ["summary.csv", "apiFindings.csv", "focusQueue.csv", "critical.csv", "xssHigh.csv", "assistant_packet.txt", "chat_summary.txt", "index.html", "jquery35_report.xls", "jspPages.csv", "pageScriptEffective.csv", "ajaxEndpoints.csv", "serverEndpoints.csv", "ajaxToServerMap.csv", "hermes_server_evidence.json", "airgap_manifest.json", "airgap_manifest.txt", "mock_routes.json"].forEach(function (f) {
       check("report file " + f, exists(path.join(r1, f)), "");
     });
+    const mockRoutes = JSON.parse(readUtf8(path.join(r1, "mock_routes.json")));
+    check("mock route carries server handler evidence", mockRoutes.routes.some(function (r) { return r.serverMatched === true && r.handler.indexOf("SampleController#list") >= 0; }), JSON.stringify(mockRoutes));
     const indexHtml = readUtf8(path.join(r1, "index.html"));
     check("dashboard focus split-view modal present", indexHtml.indexOf("focusDetailModal") >= 0 && indexHtml.indexOf("__JQ35_FOCUS_DETAILS__") >= 0 && indexHtml.indexOf("openFocusDetail(") >= 0, "");
     check("dashboard staged action queue present", indexHtml.indexOf("단계별 조치 큐") >= 0 && indexHtml.indexOf("조치 범위 로드맵</h2>") < 0 && indexHtml.indexOf("단계별 FocusQueue") < 0 && indexHtml.indexOf("1차 최소") >= 0 && indexHtml.indexOf("2차 안정화") >= 0 && indexHtml.indexOf("3차 최대/후속") >= 0, "");
@@ -4191,6 +4963,13 @@ function selfTest(opts) {
     check("learnedFindings override skipped when name corroboration mismatches (safety net)",
       !!learnedFindingMismatch && learnedFindingMismatch.priority === "Review" && learnedFindingMismatch.action === "ReviewOnly",
       learnedFindingMismatch ? JSON.stringify([learnedFindingMismatch.priority, learnedFindingMismatch.action]) : "finding not found");
+
+    const relDir = path.join(base, "release");
+    const zipPath = writeReleaseZip(mk({ report: relDir }));
+    const zipSig = fs.readFileSync(zipPath).slice(0, 4).toString("hex");
+    check("release-zip writes valid zip signature", exists(zipPath) && zipSig === "504b0304", zipSig);
+    const relManifest = JSON.parse(readUtf8(path.join(relDir, "airgap_release_manifest.json")));
+    check("release manifest includes rulepack files", relManifest.files.some(function (f) { return f.path === "rules/public-defaults.json"; }), JSON.stringify(relManifest.files.map(function (f) { return f.path; })));
   } catch (e) {
     check("no unexpected exception", false, e.stack || e.message);
   }
@@ -4218,6 +4997,10 @@ function run(argv) {
   try {
     if (mode === "self-test") {
       process.exitCode = selfTest(opts);
+      return;
+    }
+    if (mode === "release-zip") {
+      writeReleaseZip(opts);
       return;
     }
     if (!opts.report) throw new Error("--report is required");
@@ -4253,6 +5036,9 @@ function run(argv) {
     } else if (mode === "review-pack" || mode === "hermes-pack") {
       writeAllReports(model, {});
       writeReviewPack(model);
+    } else if (mode === "airgap-manifest") {
+      writeAirgapManifest(model);
+      log("airgap manifest written: " + path.join(model.reportRoot, "airgap_manifest.json"));
     }
     const c = model.counters;
     log("");

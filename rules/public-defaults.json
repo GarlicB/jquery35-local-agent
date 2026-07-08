@@ -1,0 +1,80 @@
+{
+  "webRootCandidates": [
+    "WebContent",
+    "src/main/webapp",
+    "webapp",
+    "web",
+    "www",
+    "wwwroot",
+    "public"
+  ],
+  "webRootSignals": [
+    "WEB-INF",
+    "META-INF",
+    "WEB-INF/views",
+    "WEB-INF/layouts",
+    "js",
+    "css",
+    "resources",
+    "static",
+    "assets"
+  ],
+  "pathVariables": {
+    "${js}": "/js",
+    "${css}": "/css",
+    "${images}": "/images",
+    "${img}": "/images",
+    "${context}": "",
+    "${ctx}": "",
+    "${pageContext.request.contextPath}": "",
+    "${request.contextPath}": ""
+  },
+  "vendorPatterns": [
+    "resources/jqgrid/",
+    "jquery-ui",
+    "jquery.ui",
+    "select2",
+    "autonumeric",
+    "jqgrid",
+    "jquery.jqgrid",
+    "grid.locale",
+    "bootstrap",
+    "jquery.validate",
+    "jquery-validate",
+    "datepicker",
+    "/plugin/",
+    "/plugins/",
+    "/lib/",
+    "/libs/",
+    "/vendor/",
+    "/vendors/",
+    "/thirdparty/",
+    "/third-party/"
+  ],
+  "appScriptHints": [
+    "js/util.js",
+    "js/common.js"
+  ],
+  "ignoreAttrPatterns": [
+    "aria-"
+  ],
+  "probe": {
+    "injectTargetHints": [
+      "WEB-INF/layouts/common_script_lib.jsp",
+      "WEB-INF/layouts/common.jsp",
+      "WEB-INF/jsp/common_script_lib.jsp",
+      "WEB-INF/views/common/script.jsp",
+      "WEB-INF/views/layout/common.jsp"
+    ]
+  },
+  "serverScan": {
+    "enabled": true,
+    "sourceDirs": [
+      "src/main/java",
+      "src",
+      "java"
+    ],
+    "includeXml": true,
+    "maxFileBytes": 1048576
+  }
+}

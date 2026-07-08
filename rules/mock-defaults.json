@@ -1,0 +1,25 @@
+{
+  "mockDefaults": {
+    "json": {
+      "result": "OK",
+      "success": true,
+      "mock": true,
+      "message": "jq35 local lab mock response",
+      "rows": [
+        {
+          "col1": "SAMPLE1",
+          "col2": "100",
+          "col3": "Y"
+        },
+        {
+          "col1": "SAMPLE2",
+          "col2": "200",
+          "col3": "N"
+        }
+      ],
+      "totalCount": 2
+    },
+    "html": "<div class=\"jq35-mock\">MOCK HTML RESPONSE</div>",
+    "text": "MOCK TEXT RESPONSE"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "vendorRecommendations": {
+    "jquery-ui": "jQuery UI 1.12.x or older can have its own CVEs and compatibility warnings. Prefer 1.13.2+ when possible; otherwise test datepicker, dialog, button, tabs, and autocomplete under jQuery Migrate.",
+    "jqgrid": "Do not hand-edit minified grid code. For classic jqGrid 4.x, test rendering, paging, sort, search, inline edit, formatter, and subgrid under Migrate; plan a maintained jqGrid-compatible replacement if it breaks.",
+    "select2": "Select2 4.x is the practical target for jQuery 3.x compatibility. Test placeholder, ajax search, multiple select, and initial value binding.",
+    "autoNumeric": "Old autoNumeric 1.x may work under jQuery 3.x, but should be verified. Test amount input, formatting, blur/focus, saved value, readonly, and disabled states.",
+    "datepicker": "Test open/close, locale, min/max date, keyboard entry, and readonly/disabled behavior under jQuery 3.x.",
+    "bootstrap": "Check Bootstrap JS version against jQuery 3.x compatibility and test modal, dropdown, tooltip, tab, and collapse.",
+    "jquery-validate": "Test validation trigger timing, message rendering, submit blocking, remote validation, and reset behavior.",
+    "jquery-core": "Core library file; replace by patch-jquery mode or by explicit profile jquery.newJquerySrc.",
+    "jquery-migrate": "Compatibility bridge. Keep during transition, collect warnings, and remove only after the warning budget is closed.",
+    "vendor-other": "External library. Verify jQuery 3.x compatibility by version/vendor docs or runtime testing before editing."
+  }
+}

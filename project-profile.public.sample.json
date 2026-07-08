@@ -8,7 +8,6 @@
   "webRootSignals": [
     "WEB-INF",
     "WEB-INF/views",
-    "WEB-INF/layouts",
     "js",
     "css",
     "resources",
@@ -17,30 +16,27 @@
   "pathVariables": {
     "${js}": "/js",
     "${css}": "/css",
-    "${images}": "/images",
-    "${img}": "/images",
     "${context}": "",
     "${ctx}": "",
-    "${pageContext.request.contextPath}": "",
-    "${request.contextPath}": ""
+    "${pageContext.request.contextPath}": ""
   },
   "vendorPatterns": [
-    "resources/jqgrid/",
+    "/vendor/",
+    "/vendors/",
+    "/plugin/",
+    "/plugins/",
+    "/lib/",
+    "/libs/",
     "jquery-ui",
-    "jquery.ui",
-    "select2",
-    "autoNumeric",
     "jqgrid",
-    "jquery.jqGrid",
-    "grid.locale"
+    "select2"
   ],
   "appScriptHints": [
-    "js/util.js",
-    "js/common.js"
+    "js/common.js",
+    "js/app.js"
   ],
   "ignoreAttrPatterns": [
-    "aria-disabled",
-    "aria-selected"
+    "aria-"
   ],
   "jquery": {
     "targetVersion": "3.5.1",
@@ -54,7 +50,8 @@
   "probe": {
     "enabled": true,
     "injectTargetHints": [
-      "WEB-INF/layouts/common_script_lib.jsp"
+      "WEB-INF/layouts/common.jsp",
+      "WEB-INF/views/common/script.jsp"
     ]
   },
   "serverScan": {
@@ -71,7 +68,6 @@
       "result": "OK",
       "success": true,
       "mock": true,
-      "message": "jq35 local lab mock response",
       "rows": [],
       "totalCount": 0
     },

@@ -23,10 +23,10 @@ jquery35-local-agent v5 - 명령 예시 모음
 
 6) 운영 반영 전 검증 (TO-BE 또는 반영된 브랜치 작업본을 source로):
   node run-jquery35-v5.js --source "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5_clean" --mode verify-clean
-  exit code: 0=PASS/WARN, 2=FAIL (Bamboo 게이트로 사용 가능)
+  exit code: 0=PASS/WARN, 2=FAIL (CI 게이트로 사용 가능)
   WARN도 실패로 처리: --warn-as-error
 
-7) PR/Bamboo 보고서:
+7) PR/CI 보고서:
   node run-jquery35-v5.js --source "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5_pr" --mode pr-report
 
 8) assistant_packet만 재생성:
@@ -42,11 +42,21 @@ jquery35-local-agent v5 - 명령 예시 모음
 9-1) 외부 AI 질문보다 로컬 검수팩 의도를 강조하고 싶을 때:
   node run-jquery35-v5.js --source "C:\work\legacy-app" --report "C:\work\jquery35_report_v5" --mode hermes-pack
 
-10) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 82개 체크):
+10) 폐쇄망 반입 증빙만 생성:
+  node run-jquery35-v5.js --source "C:\work\legacy-app" --report "C:\work\jquery35_report_v5" --mode airgap-manifest
+
+11) 공개 배포용 ZIP 생성 (source 불필요):
+  node run-jquery35-v5.js --report ".\release" --mode release-zip
+  -> .\release\jquery35-local-agent-v5.4.0-public.zip
+
+12) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 92개 체크):
   node run-jquery35-v5.js --mode self-test
 
 유용한 옵션:
   --profile "C:\work\legacy-app\project-profile.json"   경로변수/벤더패턴/프로브 대상/학습된 래퍼 커스터마이즈
+  --rulepack "C:\work\jquery35-rulepack"                 웹루트/벤더권고/mock 기본값을 외부 rulepack으로 교체
+  --server-source "D:\src\legacy-server"                 Java/Spring 정적 증거 루트 지정
+  --no-server-scan                                       Java/Spring 정적 증거 추출 생략
   --jquery-version 3.5.1 --migrate-version 3.6.0   교체 버전 변경
   --inject-probe                                    autofix/patch-jquery 때 프로브도 같이 삽입
   --patch-jquery                                    autofix 때 core 교체도 같이 수행
