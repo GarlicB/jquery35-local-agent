@@ -19,7 +19,7 @@
 - **폐쇄망 배포 산출물** — `airgap_manifest.json/txt`로 무의존/무통신 증빙을 남기고, `--mode release-zip`으로 공개 배포용 ZIP을 생성합니다.
 - **로컬 웹 콘솔** — `실행0_웹대시보드.bat` 또는 `--mode ui`로 브라우저에서 경로 Browse, 자동 경로 산정, plan/autofix/patch/Hermes/report 파이프라인, Local Lab, 기존 보고서 HTML 열기를 처리합니다.
 - **집계/검수 대시보드** — `index.html`에서 유형별 그래프(`event-shortcut-load` 등)와 디렉토리 depth별 분포를 먼저 보고, 파일 클릭 시 AS-IS/TO-BE 주변 코드를 모달로 비교합니다.
-- **자체 검증 내장** — `--mode self-test`가 임시 샘플 프로젝트를 만들어 전체 사이클(103개 체크)을 검증. v5.6.1은 source-only 자동 세팅, 경로/유형 집계, 웹 콘솔 파이프라인, AS-IS/TO-BE 줄바꿈 보존 자동수정을 포함합니다.
+- **자체 검증 내장** — `--mode self-test`가 임시 샘플 프로젝트를 만들어 전체 사이클(103개 체크)을 검증. v5.6.2는 source-only 자동 세팅, S1~S10 웹 콘솔 단계명, 경로/유형 집계, AS-IS/TO-BE 줄바꿈 보존 자동수정을 포함합니다.
 
 ## 빠른 시작
 
@@ -31,7 +31,7 @@ node run-jquery35-v5.js --mode ui --port 18088
 node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode plan
 ```
 
-브라우저 콘솔은 `http://127.0.0.1:18088/` 에서 열립니다. 여기서 source만 Browse 또는 입력하면 TO-BE/report/profile/server-source/verify-source 기본 경로가 자동 산정되고, 버튼 또는 One Button Pipeline으로 실행하면 됩니다.
+브라우저 콘솔은 `http://127.0.0.1:18088/` 에서 열립니다. 여기서 source만 Browse 또는 입력하면 TO-BE/report/profile/server-source/verify-source 기본 경로가 자동 산정되고, 개별 `S1~S10` 단계 또는 `Pipeline`으로 실행하면 됩니다.
 명령어 방식이 편하면 `report\index.html` 대시보드를 열어 현황을 확인하고, `README_FIRST.txt`의 순서(분석 → 자동수정 → jQuery 교체 → Probe → Lab → verify-clean)를 따라가면 됩니다.
 Windows 사용자는 동봉된 `실행0_웹대시보드.bat` ~ `실행9_배포ZIP생성.bat`의 상단 경로만 수정해 실행하세요.
 

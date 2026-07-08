@@ -8,7 +8,7 @@ jquery35-local-agent v5 - 명령 예시 모음
   node run-jquery35-v5.js --mode ui --port 18088
   접속: http://127.0.0.1:18088/
   Windows: 실행0_웹대시보드.bat
-  기능: source 지정만으로 TO-BE/report/profile/server-source/verify-source 자동 세팅, plan/autofix/patch/probe/review/verify/release 실행, One Button Pipeline, Local Lab 시작/중지, 기존 report HTML 열기
+  기능: source 지정만으로 TO-BE/report/profile/server-source/verify-source 자동 세팅, S1~S10 단계 실행, Pipeline, Local Lab 시작/중지, 기존 report HTML 열기
 
 1) 분석만 (원본/TO-BE 아무것도 수정 안 함):
   node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode plan
@@ -53,7 +53,7 @@ jquery35-local-agent v5 - 명령 예시 모음
 
 11) 공개 배포용 ZIP 생성 (source 불필요):
   node run-jquery35-v5.js --report ".\release" --mode release-zip
-  -> .\release\jquery35-local-agent-v5.6.1-public.zip
+  -> .\release\jquery35-local-agent-v5.6.2-public.zip
 
 12) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 103개 체크):
   node run-jquery35-v5.js --mode self-test
