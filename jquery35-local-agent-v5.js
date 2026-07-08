@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.3.2";
+const TOOL_VERSION = "5.3.3";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -51,7 +51,7 @@ const SKIP_CALLBACK_BASES = Object.assign(Object.create(null), { console: 1, win
 
 const PRIORITY_RANK = Object.assign(Object.create(null), {
   Critical: 90, XssHigh: 80, Manual: 70, Review: 60,
-  AutoFixed2: 50, AutoFixed: 40, VendorReview: 30, StaticHtmlLow: 20, Ignored: 10
+  AutoInferred: 50, AutoFixed: 40, VendorReview: 30, StaticHtmlLow: 20, Ignored: 10
 });
 
 function log(msg) { process.stdout.write("[jq35] " + msg + "\n"); }
@@ -1289,7 +1289,7 @@ function handleAttr(model, ctx, p) {
   const mkProp = function (valExpr) { return '.prop("' + an + '", ' + valExpr + ")"; };
   const autoEdit = function (valExpr, why, prio) {
     addFinding(model, ctx, {
-      idx: p.fIdx, category: prio === "AutoFixed2" ? "bool-attr-variable" : "bool-attr-literal",
+      idx: p.fIdx, category: prio === "AutoInferred" ? "bool-attr-variable" : "bool-attr-literal",
       pattern: '.attr("' + an + '", ...)',
       priority: prio || "AutoFixed", confidence: "High", action: "Changed",
       before: p.callText, after: mkProp(valExpr),
@@ -1371,7 +1371,7 @@ function literalGroupOf(argMasked, argOrig) {
   return null;
 }
 
-function resolveAutoFixed2(model) {
+function resolveAutoInferred(model) {
   const pend = model.findings.filter(function (f) { return f.pending && f.pending.type === "boolattr-infer"; });
   pend.forEach(function (f) {
     const ident = f.pending.ident;
@@ -1388,7 +1388,7 @@ function resolveAutoFixed2(model) {
     });
     const finalize = function (ok, why, expr, sites) {
       if (ok) {
-        f.priority = "AutoFixed2";
+        f.priority = "AutoInferred";
         f.action = "Changed";
         f.confidence = "High";
         f.after = '.prop("' + f.pending.attrName + '", ' + expr + ")";
@@ -1400,7 +1400,7 @@ function resolveAutoFixed2(model) {
       } else {
         f.priority = "Manual";
         f.action = "ReviewOnly";
-        f.reason = trunc("AutoFixed2 not possible: " + why, 300);
+        f.reason = trunc("AutoInferred not applied: " + why, 300);
         f.suggestion = '.prop("' + f.pending.attrName + '", ' + ident + ' === "Y") /* adjust comparison to actual callsite values */';
       }
       f.pending = null;
@@ -1545,7 +1545,7 @@ function analyze(model) {
     done++;
     if (done % 100 === 0) log("scanned " + done + "/" + model.textFiles.length);
   });
-  resolveAutoFixed2(model);
+  resolveAutoInferred(model);
   annotateGroupKeys(model);
   applyLearnedFindingsOverrides(model);
   analyzePages(model);
@@ -1971,7 +1971,7 @@ function buildQueues(model) {
     const result = blockers === 0 ? "AutoFixOnlyCompleteCandidate" : "NeedsReviewOrManual";
     model.completeRows.push([
       rel, result, fs2.length,
-      cnt.AutoFixed || 0, cnt.AutoFixed2 || 0, cnt.StaticHtmlLow || 0,
+      cnt.AutoFixed || 0, cnt.AutoInferred || 0, cnt.StaticHtmlLow || 0,
       cnt.Critical || 0, cnt.Manual || 0, cnt.Review || 0, cnt.XssHigh || 0, cnt.VendorReview || 0,
       result === "AutoFixOnlyCompleteCandidate" ? "only auto-fixed/low findings; no further change expected from pattern scan" : "remaining items need human review"
     ]);
@@ -2249,7 +2249,7 @@ function buildReviewCases(model) {
 
 function summarize(model) {
   const c = {};
-  const P = ["Critical", "AutoFixed", "AutoFixed2", "Review", "Manual", "XssHigh", "VendorReview", "StaticHtmlLow", "Ignored"];
+  const P = ["Critical", "AutoFixed", "AutoInferred", "Review", "Manual", "XssHigh", "VendorReview", "StaticHtmlLow", "Ignored"];
   P.forEach(function (p) { c[p] = 0; });
   model.findings.forEach(function (f) { if (c[f.priority] !== undefined) c[f.priority]++; });
   const libCounts = {};
@@ -2273,7 +2273,7 @@ function summarize(model) {
     ApiFindings: model.findings.length,
     Critical: c.Critical,
     AutoFixed: c.AutoFixed,
-    AutoFixed2: c.AutoFixed2,
+    AutoInferred: c.AutoInferred,
     Review: c.Review,
     Manual: c.Manual,
     XssHigh: c.XssHigh,
@@ -2644,7 +2644,7 @@ function writeCsvReports(model) {
   writeCsv(path.join(R, "manualQueue.csv"), FINDING_HEADER,
     model.findings.filter(function (f) { return (f.priority === "Manual" || f.priority === "Review") && f.thirdParty !== "Y"; }).map(findingRow));
   writeCsv(path.join(R, "autoFixed.csv"), FINDING_HEADER,
-    model.findings.filter(function (f) { return (f.priority === "AutoFixed" || f.priority === "AutoFixed2") && f.action === "Changed"; }).map(findingRow));
+    model.findings.filter(function (f) { return (f.priority === "AutoFixed" || f.priority === "AutoInferred") && f.action === "Changed"; }).map(findingRow));
   writeCsv(path.join(R, "vendorReview.csv"), FINDING_HEADER,
     model.findings.filter(function (f) { return f.priority === "VendorReview"; }).map(findingRow));
   writeCsv(path.join(R, "xssHigh.csv"), FINDING_HEADER,
@@ -2688,7 +2688,7 @@ function writeCsvReports(model) {
   writeCsv(path.join(R, "jsSyntax.csv"), ["RelativePath", "Result", "Reason"],
     model.syntaxRows.map(function (r) { return [r.rel, r.result, r.reason]; }));
   writeCsv(path.join(R, "completeByAutoFix.csv"),
-    ["RelativePath", "Result", "TotalFindings", "AutoFixed", "AutoFixed2", "StaticHtmlLow", "Critical", "Manual", "Review", "XssHigh", "VendorReview", "Reason"],
+    ["RelativePath", "Result", "TotalFindings", "AutoFixed", "AutoInferred", "StaticHtmlLow", "Critical", "Manual", "Review", "XssHigh", "VendorReview", "Reason"],
     model.completeRows);
   writeCsv(path.join(R, "needsWorkByFile.csv"),
     ["RelativePath", "Critical", "XssHigh", "Manual", "Review", "VendorReview", "Categories"],
@@ -2843,7 +2843,7 @@ function buildFocusDetails(model) {
 function buildAutoFixDetails(model, startIndex) {
   if (!(model.targetWcRoot && isDir(model.targetWcRoot))) return [];
   return model.findings.filter(function (f) {
-    return f.action === "Changed" && (f.priority === "AutoFixed" || f.priority === "AutoFixed2");
+    return f.action === "Changed" && (f.priority === "AutoFixed" || f.priority === "AutoInferred");
   }).slice(0, 100).map(function (f, i) {
     return findingDetail(model, f, "A" + (i + 1), startIndex + i, "AutoFixed");
   });
@@ -2891,7 +2891,7 @@ function findCount(model, fn) {
   return n;
 }
 function isChangedAutoFinding(f) {
-  return f.action === "Changed" && (f.priority === "AutoFixed" || f.priority === "AutoFixed2");
+  return f.action === "Changed" && (f.priority === "AutoFixed" || f.priority === "AutoInferred");
 }
 function countStageAuto(model, key) {
   return findCount(model, function (f) { return isChangedAutoFinding(f) && focusStageKey(f) === key; });
@@ -2967,7 +2967,7 @@ function writeIndexHtml(model) {
   parts.push('<section class="topbar"><div><div class="eyebrow">' + htmlEsc(TOOL_NAME + " v" + TOOL_VERSION) + '</div><h1>jQuery ' + htmlEsc(CVE_ID) + ' 조치 보고서</h1><div class="subtitle">Source: ' + htmlEsc(c.SourceRoot) + " / WebContent: " + htmlEsc(c.WebContentRoot) + " / Target: " + htmlEsc(c.TargetRoot) + '</div></div><div class="metaPills"><span class="pill">Mode ' + htmlEsc(c.Mode) + '</span><span class="pill">Target ' + htmlEsc(c.JqueryTargetVersion) + '</span><span class="pill">Pass ' + htmlEsc(c.JqueryFloorVersion) + '+</span></div></section>');
   parts.push('<h2>요약</h2><div class="cards">');
   parts.push(kpiCard("3.5 게이트", c.Gate35Blockers, "#b00020"));
-  parts.push(kpiCard("자동수정", c.AutoFixed + c.AutoFixed2, "#1b5e20"));
+  parts.push(kpiCard("자동수정", c.AutoFixed + c.AutoInferred, "#1b5e20"));
   parts.push(kpiCard("FocusQueue", c.FocusQueue, "#6a1b9a"));
   parts.push(kpiCard("수동/검토", c.Manual + c.Review, "#b26a00"));
   parts.push(kpiCard("XSS 고위험", c.XssHigh, "#b00020"));
@@ -3011,7 +3011,7 @@ function recommendedActions(model) {
   const c = model.counters;
   const out = [];
   if (c.Critical > 0) out.push("jQuery " + model.profile.jquery.targetVersion + " + Migrate " + model.profile.jquery.migrateVersion + " 파일을 WebContent/js에 배치한 뒤 patch-jquery 모드로 " + c.Critical + "개 호출부를 교체 (CVE-2020-11023 핵심 조치)");
-  if (c.AutoFixed + c.AutoFixed2 > 0) out.push("autofix 결과 TO-BE와 원본을 WinMerge/Eclipse Compare로 비교 후 안전 자동수정 " + (c.AutoFixed + c.AutoFixed2) + "건을 브랜치에 반영");
+  if (c.AutoFixed + c.AutoInferred > 0) out.push("autofix 결과 TO-BE와 원본을 WinMerge/Eclipse Compare로 비교 후 안전 자동수정 " + (c.AutoFixed + c.AutoInferred) + "건을 브랜치에 반영");
   if (c.Manual > 0) out.push("manualQueue.csv의 수동 조치 " + c.Manual + "건 처리 (.success/.error/.complete 전환, boolean attr 변수 타입 확인)");
   if (c.XssHigh > 0) out.push("XssHigh " + c.XssHigh + "건 DOM XSS 검토: .text()/escapeHtml 적용 또는 신뢰 경계 확인 (jQuery 업그레이드만으로는 미해결)");
   if (c.VendorReview > 0) out.push("벤더 라이브러리(jqGrid/jquery-ui/select2/autoNumeric)는 직접 수정하지 말고 Migrate 상태에서 화면 테스트 및 호환 버전 검토");
@@ -3029,7 +3029,7 @@ function packetLines(model) {
   L.push("JQUERY35_LOCAL_AGENT_PACKET v" + TOOL_VERSION);
   ["SourceRoot", "WebContentRoot", "TargetRoot", "ReportRoot", "Mode", "TotalFiles", "TextFiles", "PageFiles", "JsFiles",
     "JqueryTargetVersion", "JqueryFloorVersion", "Gate35Blockers",
-    "ChangedFiles", "ApiFindings", "Critical", "AutoFixed", "AutoFixed2", "Review", "Manual", "XssHigh", "FocusQueue",
+    "ChangedFiles", "ApiFindings", "Critical", "AutoFixed", "AutoInferred", "Review", "Manual", "XssHigh", "FocusQueue",
     "VendorReview", "StaticHtmlLow", "JqueryLoads", "OldJqueryBelow350", "PageRiskMultipleJqueryCore",
     "PageRiskOldJqueryCore", "PageRiskMigrateMissing", "PageRiskMigrateBeforeCore", "UnresolvedRefs", "AjaxEndpoints", "JsSyntaxFail",
     "ReviewCasesTotal", "ReviewCasesInPack", "LearnedWrapperCount", "LearnedFindingOverrides",
@@ -3088,7 +3088,7 @@ function writeChatSummary(model) {
   L.push("");
   L.push("핵심 수치");
   L.push("- 3.5 게이트(" + c.JqueryFloorVersion + " 미만 jQuery core 호출부): " + c.Gate35Blockers + "건 -> patch-jquery 모드로 " + c.JqueryTargetVersion + " 교체 (자동수정 아님)");
-  L.push("- 안전 자동수정(AutoFixed): " + c.AutoFixed + "건 / 콜사이트 추론 자동수정(AutoFixed2): " + c.AutoFixed2 + "건");
+  L.push("- 안전 자동수정(AutoFixed): " + c.AutoFixed + "건 / 콜사이트 추론 자동수정(AutoInferred): " + c.AutoInferred + "건");
   L.push("- 수동 조치(Manual): " + c.Manual + "건 / 검토(Review): " + c.Review + "건");
   L.push("- DOM XSS 고위험(XssHigh): " + c.XssHigh + "건 (jQuery 업그레이드와 별개로 조치 필요)");
   L.push("- 벤더 검토(VendorReview): " + c.VendorReview + "건 (jqGrid/jquery-ui/select2/autoNumeric 등, 직접 수정 금지)");
@@ -3172,7 +3172,7 @@ function writePrReport(model) {
   L.push("|---|---|");
   L.push("| 구버전 jQuery core 호출부(Critical) | " + c.Critical + " |");
   L.push("| 안전 자동수정(AutoFixed) | " + c.AutoFixed + " |");
-  L.push("| 콜사이트 추론 자동수정(AutoFixed2) | " + c.AutoFixed2 + " |");
+  L.push("| 콜사이트 추론 자동수정(AutoInferred) | " + c.AutoInferred + " |");
   L.push("| 수동 조치(Manual) | " + c.Manual + " |");
   L.push("| DOM XSS 검토(XssHigh) | " + c.XssHigh + " |");
   L.push("| 벤더 호환성 검토(VendorReview) | " + c.VendorReview + " |");
@@ -3740,7 +3740,7 @@ function selfTest(opts) {
     const c1 = m1.counters;
     check("critical detected (2 old jquery refs)", c1.Critical === 2, "got " + c1.Critical);
     check("autoFixed >= 6", c1.AutoFixed >= 6, "got " + c1.AutoFixed);
-    check("autoFixed2 == 3 (sts Y/N + flag bool + blean heuristic)", c1.AutoFixed2 === 3, "got " + c1.AutoFixed2);
+    check("autoInferred == 3 (sts Y/N + flag bool + blean heuristic)", c1.AutoInferred === 3, "got " + c1.AutoInferred);
     check("xssHigh >= 1 (.html(response))", c1.XssHigh >= 1, "got " + c1.XssHigh);
     check("staticHtmlLow >= 1 (append option literal)", c1.StaticHtmlLow >= 1, "got " + c1.StaticHtmlLow);
     check("vendorReview >= 1 (jqgrid fixture)", c1.VendorReview >= 1, "got " + c1.VendorReview);
@@ -3765,9 +3765,9 @@ function selfTest(opts) {
     writeTarget(m2, {});
     writeAllReports(m2, {});
     const utilTobe = readLatin1(path.join(t1, "WebContent", "js", "util.js"));
-    check("AutoFixed2 sts === Y", utilTobe.indexOf('.prop("disabled", sts === "Y")') >= 0, trunc(utilTobe, 200));
-    check("AutoFixed2 flag boolean", utilTobe.indexOf('.prop("disabled", flag)') >= 0, "");
-    check("AutoFixed2 blean heuristic", utilTobe.indexOf('$("#lineDel").prop("disabled", blean)') >= 0, "");
+    check("AutoInferred sts === Y", utilTobe.indexOf('.prop("disabled", sts === "Y")') >= 0, trunc(utilTobe, 200));
+    check("AutoInferred flag boolean", utilTobe.indexOf('.prop("disabled", flag)') >= 0, "");
+    check("AutoInferred blean heuristic", utilTobe.indexOf('$("#lineDel").prop("disabled", blean)') >= 0, "");
     check("delegate -> on", utilTobe.indexOf('.on("click", ".row", onRow)') >= 0, "");
     check("unbind -> off", utilTobe.indexOf('$list.off("mouseover")') >= 0, "");
     check("Function.bind preserved", utilTobe.indexOf("onRow.bind(this)") >= 0, "");
@@ -3985,7 +3985,7 @@ function run(argv) {
     const c = model.counters;
     log("");
     log("SUMMARY: files=" + c.TotalFiles + " findings=" + c.ApiFindings +
-      " critical=" + c.Critical + " autoFixed=" + (c.AutoFixed + c.AutoFixed2) +
+      " critical=" + c.Critical + " autoFixed=" + (c.AutoFixed + c.AutoInferred) +
       " manual=" + c.Manual + " xssHigh=" + c.XssHigh + " focusQueue=" + c.FocusQueue);
     if (c.Critical > 0 && mode !== "patch-jquery") {
       warn("old jQuery core references remain (" + c.Critical + "); they are replaced only by patch-jquery mode");
