@@ -8,3 +8,6 @@ runtime-lab/inbox/*
 !runtime-lab/inbox/README.txt
 runtime-lab/logs/
 runtime-lab/.work/
+
+# local multi-channel agent bridge (not for public release)
+_agent_bridge/
