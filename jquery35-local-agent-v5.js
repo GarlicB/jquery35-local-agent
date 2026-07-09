@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.6.4";
+const TOOL_VERSION = "5.6.5";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -1786,6 +1786,7 @@ function buildModel(opts, mode) {
     ajaxRows: [], syntaxRows: [], probeInjections: [], patchResults: [],
     serverFiles: [], serverEndpointRows: [], serverEvidenceRows: [], ajaxServerRows: [],
     uiElementRows: [], selectorElementRows: [], runtimeScenarios: [],
+    runtimeParityRows: [], ieModePageRows: [],
     uiElementsByPage: Object.create(null),
     changed: {}, editWarnings: [], git: null, counters: {}, focus: [],
     scriptInv: [], pluginInv: [], dirInv: [], completeRows: [], needsRows: [],
@@ -1861,6 +1862,7 @@ function analyze(model) {
   buildQueues(model);
   buildSelectorElementMap(model);
   buildRuntimeScenarios(model);
+  buildRuntimeParity(model);
   buildReviewCases(model);
   model.git = gitInfo(model.sourceRoot);
   summarize(model);
@@ -2842,6 +2844,220 @@ function buildRuntimeScenarios(model) {
   model.runtimeScenarios = scenarios;
 }
 
+function pagesForRel(model, rel) {
+  const out = [];
+  const add = function (p) { if (p && out.indexOf(p) < 0) out.push(p); };
+  const ctx = model.ctxByRel[rel];
+  if (ctx && ctx.isPage) add(rel);
+  (model.effectiveRows || []).forEach(function (r) { if (r.resolved === rel) add(r.page); });
+  (model.pageScriptRows || []).forEach(function (r) { if (r.resolved === rel) add(r.page); });
+  return out.slice(0, 50);
+}
+
+function pageEffectiveLibs(model, pageRel) {
+  const libs = Object.create(null);
+  (model.effectiveRows || []).forEach(function (r) {
+    if (r.page === pageRel && r.lib) libs[r.lib] = (libs[r.lib] || 0) + 1;
+  });
+  return libs;
+}
+
+function addUnique(arr, value) {
+  if (value && arr.indexOf(value) < 0) arr.push(value);
+}
+
+function pageRuntimeSignals(model, pageRel) {
+  const p = model.pages.filter(function (x) { return x.rel === pageRel; })[0];
+  const ctx = model.ctxByRel[pageRel];
+  const text = ctx ? ctx.text : "";
+  const libs = pageEffectiveLibs(model, pageRel);
+  const signals = [];
+  const ie = [];
+  const spring = [];
+  const vendor = [];
+  if (p && p.riskOldCore) addUnique(spring, "old jquery core must be checked on the real deployed page");
+  if (p && p.riskMultiCore) addUnique(spring, "multiple jQuery core loads depend on real include order");
+  if (p && p.riskMigrateMissing) addUnique(spring, "Migrate missing after core upgrade");
+  if ((model.unresolvedRows || []).some(function (r) { return r.page === pageRel; })) addUnique(spring, "unresolved JSP/include/resource reference");
+  Object.keys(libs).forEach(function (lib) {
+    if (lib === "jqgrid") { addUnique(ie, "jqGrid legacy plugin"); addUnique(vendor, "jqGrid"); }
+    else if (lib === "jquery-ui") { addUnique(spring, "jQuery UI widget smoke test on the real page"); addUnique(vendor, "jQuery UI"); }
+    else if (lib === "select2") { addUnique(spring, "select2 widget smoke test on the real page"); addUnique(vendor, "select2"); }
+    else if (lib === "autoNumeric") { addUnique(spring, "autoNumeric input formatting smoke test on the real page"); addUnique(vendor, "autoNumeric"); }
+    else if (lib === "vendor-other") { addUnique(spring, "third-party jQuery plugin smoke test on the real page"); addUnique(vendor, "vendor-other"); }
+  });
+  if (/ActiveXObject|classid\s*=|codebase\s*=|<object\b|<embed\b/i.test(text)) addUnique(ie, "ActiveX/object/embed style integration");
+  if (/document\.documentMode|X-UA-Compatible|attachEvent|detachEvent/i.test(text)) addUnique(ie, "IE-specific browser branch");
+  if (/<iframe\b|<frame\b/i.test(text)) addUnique(ie, "iframe/frame page composition");
+  if (/window\.open|showModalDialog|showModelessDialog/i.test(text)) addUnique(ie, "popup/modal window flow");
+  if (/<input\b[^>]*type\s*=\s*["']?file/i.test(text)) addUnique(ie, "file upload control");
+  if (/rdviewer|reportviewer|crystal|ocx|cab/i.test(text)) addUnique(ie, "legacy viewer/control keyword");
+  ie.forEach(function (x) { addUnique(signals, "IE:" + x); });
+  spring.forEach(function (x) { addUnique(signals, "SPRING:" + x); });
+  return { page: pageRel, pageInfo: p || null, ie: ie, spring: spring, vendor: vendor, signals: signals, libs: Object.keys(libs).sort() };
+}
+
+function findingRuntimeSignals(model, f, pageSignals) {
+  const ie = [];
+  const spring = [];
+  const reasons = [];
+  const cat = f.category || "";
+  const ajaxRows = (model.ajaxRows || []).filter(function (r) { return r.rel === f.rel && Math.abs((r.line || 0) - (f.line || 0)) <= 8; });
+  if (f.priority === "Critical" || cat.indexOf("jquery-core") === 0) {
+    addUnique(spring, "real JSP include/script path order must be checked after patch-jquery");
+  }
+  if (f.priority === "XssHigh" || cat === "dom-sink" || cat === "wrapper-dom-sink" || cat === "dom-factory" || cat === "parse-html") {
+    addUnique(spring, "server/user data origin affects DOM sink safety");
+  }
+  if (cat === "jqxhr-shorthand" || ajaxRows.length > 0) {
+    addUnique(spring, "AJAX callback and server response shape must be exercised");
+  }
+  if (cat === "live-die" || cat.indexOf("event-shortcut") === 0) {
+    addUnique(ie, "legacy event behavior should be checked in IE mode");
+  }
+  if (cat === "bind-to-on" || cat === "unbind-to-off") {
+    addUnique(reasons, "event rewrite is usually structurally safe but still needs target-flow smoke test");
+  }
+  if (cat.indexOf("bool-attr") === 0) {
+    addUnique(reasons, "boolean attr/property rewrite is stable across jQuery 1.x/3.x when value domain is known");
+  }
+  if (f.priority === "VendorReview" || f.thirdParty === "Y") {
+    addUnique(ie, "vendor jQuery plugin behavior cannot be proven by static scan");
+  }
+  (pageSignals || []).forEach(function (ps) {
+    ps.ie.forEach(function (x) { addUnique(ie, x); });
+    ps.spring.forEach(function (x) { addUnique(spring, x); });
+  });
+  return { ie: ie, spring: spring, reasons: reasons, ajaxRows: ajaxRows };
+}
+
+function parityLevel(needSpring, needIe) {
+  if (needIe) return "IE_MODE_REQUIRED";
+  if (needSpring) return "SPRING_TOMCAT_REQUIRED";
+  return "LOCAL_LAB_OK";
+}
+
+function parityConfidence(level, f) {
+  if (level === "LOCAL_LAB_OK") {
+    if (f.action === "Changed" && (f.priority === "AutoFixed" || f.priority === "AutoInferred")) return "High";
+    if (f.priority === "StaticHtmlLow" || f.priority === "Ignored") return "High";
+    return "Medium";
+  }
+  if (level === "SPRING_TOMCAT_REQUIRED") return "Medium";
+  return "Low";
+}
+
+function parityRecommendation(level) {
+  if (level === "LOCAL_LAB_OK") return "Local Lab/정적 diff/Probe smoke test로 1차 확인. 실배포 전 대표 화면만 짧게 확인합니다.";
+  if (level === "SPRING_TOMCAT_REQUIRED") return "로컬 Eclipse/Tomcat 또는 개발계에서 실제 Spring/JSP/AJAX를 실행하고 Probe 로그를 저장합니다.";
+  return "Windows Edge IE mode에서 해당 시나리오를 직접 수행하고 Probe 로그/업무 결과를 저장합니다.";
+}
+
+function buildRuntimeParity(model) {
+  const rows = [];
+  const pageAgg = Object.create(null);
+  const scenarioByFinding = Object.create(null);
+  model.runtimeScenarios.forEach(function (s) {
+    scenarioByFinding[s.findingRel + "|" + s.line + "|" + s.category] = s;
+  });
+  function pageAggOf(page) {
+    if (!pageAgg[page]) {
+      const sig = pageRuntimeSignals(model, page);
+      pageAgg[page] = {
+        page: page, score: 0, findings: 0, scenarios: 0, ajax: 0,
+        needsSpring: sig.spring.length > 0, needsIe: sig.ie.length > 0,
+        reasons: sig.signals.slice(), vendors: sig.vendor.slice(), libs: sig.libs.slice()
+      };
+    }
+    return pageAgg[page];
+  }
+  model.pages.forEach(function (p) { pageAggOf(p.rel); });
+  model.ajaxRows.forEach(function (a) {
+    pagesForRel(model, a.rel).forEach(function (p) {
+      const ag = pageAggOf(p);
+      ag.ajax++;
+      ag.needsSpring = true;
+      addUnique(ag.reasons, "SPRING:AJAX endpoint " + a.method + " " + a.urlNorm);
+    });
+  });
+  model.runtimeScenarios.forEach(function (s) {
+    if (s.page) pageAggOf(s.page).scenarios++;
+  });
+  const candidates = [];
+  const seen = Object.create(null);
+  function addCandidate(f) {
+    const key = f.rel + "|" + f.line + "|" + f.category + "|" + f.priority;
+    if (seen[key]) return;
+    seen[key] = 1;
+    candidates.push(f);
+  }
+  model.focus.forEach(addCandidate);
+  model.findings.filter(isChangedAutoFinding).forEach(addCandidate);
+  model.findings.filter(function (f) { return f.priority === "VendorReview" || f.priority === "XssHigh"; }).forEach(addCandidate);
+  candidates.forEach(function (f) {
+    const scenario = scenarioByFinding[f.rel + "|" + f.line + "|" + f.category] || null;
+    let pages = scenario && scenario.page ? [scenario.page] : pagesForFinding(model, f);
+    if (pages.length === 0 && model.ctxByRel[f.rel] && model.ctxByRel[f.rel].isPage) pages = [f.rel];
+    const pageSignals = pages.map(function (p) { return pageRuntimeSignals(model, p); });
+    const sig = findingRuntimeSignals(model, f, pageSignals);
+    const needSpring = sig.spring.length > 0;
+    const needIe = sig.ie.length > 0;
+    const level = parityLevel(needSpring, needIe);
+    const reasonParts = [];
+    sig.reasons.forEach(function (x) { addUnique(reasonParts, x); });
+    sig.spring.forEach(function (x) { addUnique(reasonParts, "SPRING:" + x); });
+    sig.ie.forEach(function (x) { addUnique(reasonParts, "IE:" + x); });
+    if (reasonParts.length === 0) addUnique(reasonParts, "structural jQuery API compatibility; no server/IE-only signal detected");
+    rows.push({
+      id: "RP-" + String(rows.length + 1).padStart(4, "0"),
+      scenarioId: scenario ? scenario.id : "",
+      stage: focusStageKey(f),
+      page: pages[0] || "",
+      findingRel: f.rel,
+      line: f.line,
+      category: f.category,
+      priority: f.priority,
+      level: level,
+      localLabConfidence: parityConfidence(level, f),
+      needsSpringTomcat: needSpring ? "Y" : "N",
+      needsIeMode: needIe ? "Y" : "N",
+      reason: reasonParts.slice(0, 8).join(" | "),
+      recommendation: parityRecommendation(level)
+    });
+    pages.forEach(function (p) {
+      const ag = pageAggOf(p);
+      ag.findings++;
+      if (needSpring) ag.needsSpring = true;
+      if (needIe) ag.needsIe = true;
+      reasonParts.forEach(function (x) { addUnique(ag.reasons, x); });
+    });
+  });
+  Object.keys(pageAgg).forEach(function (p) {
+    const ag = pageAgg[p];
+    ag.score = ag.findings * 5 + ag.scenarios * 8 + ag.ajax * 12 + (ag.needsSpring ? 25 : 0) + (ag.needsIe ? 45 : 0) + ag.vendors.length * 10;
+  });
+  model.ieModePageRows = Object.keys(pageAgg).map(function (p) {
+    const ag = pageAgg[p];
+    const level = parityLevel(ag.needsSpring, ag.needsIe);
+    return {
+      page: p,
+      level: level,
+      localLabConfidence: level === "LOCAL_LAB_OK" ? "High" : level === "SPRING_TOMCAT_REQUIRED" ? "Medium" : "Low",
+      needsSpringTomcat: ag.needsSpring ? "Y" : "N",
+      needsIeMode: ag.needsIe ? "Y" : "N",
+      score: ag.score,
+      findings: ag.findings,
+      scenarios: ag.scenarios,
+      ajax: ag.ajax,
+      vendors: ag.vendors.join(" | "),
+      reasons: ag.reasons.slice(0, 10).join(" | ")
+    };
+  }).sort(function (a, b) {
+    return b.score - a.score || (a.page < b.page ? -1 : 1);
+  });
+  model.runtimeParityRows = rows;
+}
+
 function isAmbiguousFinding(f) {
   if (f.thirdParty === "Y") return false;
   if (f.priority === "Review") return true;
@@ -3155,6 +3371,12 @@ function summarize(model) {
     UiElements: model.uiElementRows.length,
     SelectorElementRows: model.selectorElementRows.length,
     RuntimeScenarios: model.runtimeScenarios.length,
+    RuntimeParityRows: model.runtimeParityRows.length,
+    RuntimeParityLocalOk: model.runtimeParityRows.filter(function (r) { return r.level === "LOCAL_LAB_OK"; }).length,
+    RuntimeParitySpringTomcat: model.runtimeParityRows.filter(function (r) { return r.level === "SPRING_TOMCAT_REQUIRED"; }).length,
+    RuntimeParityIeMode: model.runtimeParityRows.filter(function (r) { return r.level === "IE_MODE_REQUIRED"; }).length,
+    IeModeRiskPages: model.ieModePageRows.filter(function (r) { return r.needsIeMode === "Y"; }).length,
+    SpringRuntimePages: model.ieModePageRows.filter(function (r) { return r.needsSpringTomcat === "Y"; }).length,
     JsSyntaxFail: model.syntaxRows.filter(function (r) { return r.result === "FAIL"; }).length,
     LibraryCounts: JSON.stringify(libCounts),
     GitInfo: model.git && model.git.available ? (model.git.branch + " changed=" + model.git.changed.length + " untracked=" + model.git.untracked.length) : "Unavailable",
@@ -3632,24 +3854,31 @@ function writeCsvReports(model) {
   writeCsv(path.join(R, "selectorElementMap.csv"),
     ["FindingRank", "RelativePath", "LineNumber", "Category", "Priority", "Selector", "SelectorKind", "PagePath", "MatchedElement", "Role", "Confidence", "Note"],
     model.selectorElementRows.map(function (r) { return [r.findingRank, r.rel, r.line, r.category, r.priority, r.selector, r.selectorKind, r.page, r.element, r.role, r.confidence, r.note]; }));
-  writeCsv(path.join(R, "runtimeScenarios.csv"),
-    ["ScenarioId", "Stage", "PagePath", "FindingPath", "LineNumber", "Category", "Priority", "Confidence", "Selector", "UiTarget", "Role", "Why", "Action", "PassWhen", "FailWhen", "ProbeCheck"],
-    model.runtimeScenarios.map(function (r) { return [r.id, r.stage, r.page, r.findingRel, r.line, r.category, r.priority, r.confidence, r.selector, r.uiTarget, r.role, r.why, r.action, r.passWhen, r.failWhen, r.probeCheck]; }));
-  writeUtf8(path.join(R, "runtime_scenarios.json"), JSON.stringify({
-    tool: TOOL_NAME,
-    version: TOOL_VERSION,
-    generated: true,
-    uiElementCount: model.uiElementRows.length,
+	  writeCsv(path.join(R, "runtimeScenarios.csv"),
+	    ["ScenarioId", "Stage", "PagePath", "FindingPath", "LineNumber", "Category", "Priority", "Confidence", "Selector", "UiTarget", "Role", "Why", "Action", "PassWhen", "FailWhen", "ProbeCheck"],
+	    model.runtimeScenarios.map(function (r) { return [r.id, r.stage, r.page, r.findingRel, r.line, r.category, r.priority, r.confidence, r.selector, r.uiTarget, r.role, r.why, r.action, r.passWhen, r.failWhen, r.probeCheck]; }));
+	  writeCsv(path.join(R, "runtimeParity.csv"),
+	    ["RuntimeParityId", "ScenarioId", "Stage", "PagePath", "FindingPath", "LineNumber", "Category", "Priority", "ParityLevel", "LocalLabConfidence", "NeedsSpringTomcat", "NeedsIeMode", "Reason", "RecommendedCheck"],
+	    model.runtimeParityRows.map(function (r) { return [r.id, r.scenarioId, r.stage, r.page, r.findingRel, r.line, r.category, r.priority, r.level, r.localLabConfidence, r.needsSpringTomcat, r.needsIeMode, r.reason, r.recommendation]; }));
+	  writeCsv(path.join(R, "ieModeRisk.csv"),
+	    ["PagePath", "ParityLevel", "LocalLabConfidence", "NeedsSpringTomcat", "NeedsIeMode", "RiskScore", "MappedFindings", "RuntimeScenarios", "AjaxCount", "VendorSignals", "Reasons"],
+	    model.ieModePageRows.map(function (r) { return [r.page, r.level, r.localLabConfidence, r.needsSpringTomcat, r.needsIeMode, r.score, r.findings, r.scenarios, r.ajax, r.vendors, r.reasons]; }));
+	  writeUtf8(path.join(R, "runtime_scenarios.json"), JSON.stringify({
+	    tool: TOOL_NAME,
+	    version: TOOL_VERSION,
+	    generated: true,
+	    uiElementCount: model.uiElementRows.length,
     selectorElementRows: model.selectorElementRows.map(function (r) {
       return {
         findingRank: r.findingRank, rel: r.rel, line: r.line, category: r.category, priority: r.priority,
         selector: r.selector, selectorKind: r.selectorKind, page: r.page, element: r.element, role: r.role,
         confidence: r.confidence, note: r.note
       };
-    }),
-    scenarios: model.runtimeScenarios
-  }, null, 2) + "\n", false);
-  writeRuntimeScenariosHtml(model);
+	    }),
+	    scenarios: model.runtimeScenarios
+	  }, null, 2) + "\n", false);
+	  writeRuntimeScenariosHtml(model);
+	  writeRuntimeParityHtml(model);
   writeUtf8(path.join(R, "hermes_server_evidence.json"), JSON.stringify({
     generated: true,
     serverFiles: model.serverFiles,
@@ -3712,10 +3941,14 @@ function writeXls(model) {
     model.serverEndpointRows.slice(0, 2000).map(function (r) { return [r.rel, r.line, r.httpMethod, r.path, r.className + "#" + r.methodName, r.responseBody]; })));
   sheets.push(xlsSheet("AjaxToServer", ["RelativePath", "Line", "Ajax", "Matched", "Handler", "Confidence"],
     model.ajaxServerRows.slice(0, 2000).map(function (r) { return [r.rel, r.line, r.ajaxMethod + " " + r.ajaxUrl, r.matched, r.handler, r.confidence]; })));
-  sheets.push(xlsSheet("RuntimeScenarios", ["ScenarioId", "Stage", "Page", "Finding", "Category", "Priority", "Target", "Action", "PassWhen"],
-    model.runtimeScenarios.slice(0, 2000).map(function (r) { return [r.id, stageLabel(r.stage), r.page, r.findingRel + ":" + r.line, r.category, r.priority, r.uiTarget || r.selector, r.action, r.passWhen]; })));
-  sheets.push(xlsSheet("SelectorMap", ["Finding", "Selector", "Page", "Element", "Role", "Confidence"],
-    model.selectorElementRows.slice(0, 2000).map(function (r) { return [r.rel + ":" + r.line, r.selector, r.page, r.element, r.role, r.confidence]; })));
+	  sheets.push(xlsSheet("RuntimeScenarios", ["ScenarioId", "Stage", "Page", "Finding", "Category", "Priority", "Target", "Action", "PassWhen"],
+	    model.runtimeScenarios.slice(0, 2000).map(function (r) { return [r.id, stageLabel(r.stage), r.page, r.findingRel + ":" + r.line, r.category, r.priority, r.uiTarget || r.selector, r.action, r.passWhen]; })));
+	  sheets.push(xlsSheet("RuntimeParity", ["Id", "Scenario", "Stage", "Page", "Finding", "Category", "Priority", "Level", "LocalConfidence", "Spring", "IE", "Reason"],
+	    model.runtimeParityRows.slice(0, 2000).map(function (r) { return [r.id, r.scenarioId, stageLabel(r.stage), r.page, r.findingRel + ":" + r.line, r.category, r.priority, r.level, r.localLabConfidence, r.needsSpringTomcat, r.needsIeMode, r.reason]; })));
+	  sheets.push(xlsSheet("IeModeRisk", ["Page", "Level", "LocalConfidence", "Spring", "IE", "Score", "Findings", "Scenarios", "Ajax", "Vendors", "Reasons"],
+	    model.ieModePageRows.slice(0, 2000).map(function (r) { return [r.page, r.level, r.localLabConfidence, r.needsSpringTomcat, r.needsIeMode, r.score, r.findings, r.scenarios, r.ajax, r.vendors, r.reasons]; })));
+	  sheets.push(xlsSheet("SelectorMap", ["Finding", "Selector", "Page", "Element", "Role", "Confidence"],
+	    model.selectorElementRows.slice(0, 2000).map(function (r) { return [r.rel + ":" + r.line, r.selector, r.page, r.element, r.role, r.confidence]; })));
   const doc = ['<?xml version="1.0" encoding="UTF-8"?>',
     '<?mso-application progid="Excel.Sheet"?>',
     '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">',
@@ -3735,11 +3968,15 @@ function tableHtml(header, rows, rawCells) {
   let h = '<div class="tableWrap"><table><thead><tr>';
   header.forEach(function (x) { h += "<th>" + htmlEsc(x) + "</th>"; });
   h += "</tr></thead><tbody>";
-  rows.forEach(function (r) {
-    h += "<tr>";
-    r.forEach(function (c) { h += "<td>" + (rawCells && /^<div class="barCell">/.test(String(c)) ? String(c) : htmlEsc(c)) + "</td>"; });
-    h += "</tr>";
-  });
+	  rows.forEach(function (r) {
+	    h += "<tr>";
+	    r.forEach(function (c) {
+	      const raw = String(c);
+	      const allowed = rawCells && (/^<div class="barCell">/.test(raw) || /^<span class="badge /.test(raw));
+	      h += "<td>" + (allowed ? raw : htmlEsc(c)) + "</td>";
+	    });
+	    h += "</tr>";
+	  });
   return h + "</tbody></table></div>";
 }
 function stageLabel(key) {
@@ -3768,6 +4005,46 @@ function writeRuntimeScenariosHtml(model) {
   parts.push("</div></main></body></html>");
   writeUtf8(path.join(model.reportRoot, "runtime_scenarios.html"), parts.join("\n"), false);
 }
+
+function parityTone(level) {
+  if (level === "IE_MODE_REQUIRED") return "bad";
+  if (level === "SPRING_TOMCAT_REQUIRED") return "warn";
+  return "ok";
+}
+
+function writeRuntimeParityHtml(model) {
+  const c = model.counters;
+  const parts = [];
+  parts.push("<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\"><title>Runtime parity analyzer</title><style>");
+  parts.push("*{box-sizing:border-box}body{font-family:'Malgun Gothic',AppleGothic,sans-serif;margin:0;background:#f1f4f8;color:#202733}.wrap{max-width:1400px;margin:0 auto;padding:22px}.top{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:18px 20px;display:flex;justify-content:space-between;gap:18px}.eyebrow{font-size:11px;font-weight:800;color:#5b6677;text-transform:uppercase}h1{font-size:22px;margin:4px 0 0}.sub{font-size:12px;color:#5b6677;margin-top:8px;line-height:1.45}.pill{display:inline-block;border:1px solid #d7ddea;border-radius:999px;background:#f7f9fc;padding:5px 9px;font-size:12px;margin:2px}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px}.card{background:#fff;border:1px solid #d8dee8;border-left:4px solid #607d8b;border-radius:8px;padding:12px}.card b{display:block;font-size:23px;line-height:1}.card span{font-size:12px;color:#667085}.ok{color:#166534}.warn{color:#b54708}.bad{color:#b42318}.tableWrap{overflow:auto;border:1px solid #dfe5ef;border-radius:8px;background:#fff;margin-top:8px}table{border-collapse:collapse;background:#fff;font-size:12px;width:100%}th,td{border-bottom:1px solid #e6ebf2;padding:7px 9px;text-align:left;word-break:break-all;vertical-align:top}th{background:#f5f7fb;color:#344054;font-weight:800}.badge{border-radius:999px;border:1px solid #d7ddea;background:#f8fafc;padding:2px 7px;white-space:nowrap;font-size:11px}.badge.ok{border-color:#a6d8b3;background:#f0fff4}.badge.warn{border-color:#ffd08a;background:#fff7e6}.badge.bad{border-color:#ffb4a8;background:#fff1ef}.note{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:12px;margin-top:14px;font-size:12px;color:#475467;line-height:1.5}@media(max-width:900px){.top{display:block}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}");
+  parts.push("</style></head><body><main class=\"wrap\">");
+  parts.push("<section class=\"top\"><div><div class=\"eyebrow\">" + htmlEsc(TOOL_NAME + " v" + TOOL_VERSION) + "</div><h1>Runtime Parity Analyzer</h1><div class=\"sub\">Local Lab/mock 결과를 어디까지 신뢰할 수 있는지, 실제 Spring/Tomcat 또는 Windows Edge IE mode 확인이 필요한 지점을 분리합니다. 이 판정은 취약점 자동수정 여부를 바꾸지 않고 검증 범위만 줄이는 보조 기준입니다.</div></div><div><span class=\"pill\">rows " + htmlEsc(c.RuntimeParityRows) + "</span><span class=\"pill\">pages " + htmlEsc(model.ieModePageRows.length) + "</span></div></section>");
+  parts.push('<div class="cards"><div class="card"><b class="ok">' + htmlEsc(c.RuntimeParityLocalOk) + '</b><span>Local Lab 신뢰 높음</span></div><div class="card"><b class="warn">' + htmlEsc(c.RuntimeParitySpringTomcat) + '</b><span>Spring/Tomcat 필요</span></div><div class="card"><b class="bad">' + htmlEsc(c.RuntimeParityIeMode) + '</b><span>IE mode 필수</span></div><div class="card"><b class="bad">' + htmlEsc(c.IeModeRiskPages) + '</b><span>IE mode 리스크 페이지</span></div></div>');
+  parts.push('<div class="note">기준: 구조적 jQuery API 전환(.on/.off/.prop/.length 등)은 Local Lab 신뢰도가 높습니다. AJAX 응답, JSP include/Tiles, 서버 데이터 기반 DOM sink는 Spring/Tomcat 실기동이 필요합니다. jqGrid/legacy plugin, ActiveX/object, iframe, popup, file upload, IE 분기 코드는 Windows Edge IE mode 수동 검증 대상으로 올립니다.</div>');
+  parts.push("<h2>페이지별 환경 리스크</h2>");
+  parts.push(tableHtml(["페이지", "판정", "Local 신뢰", "Spring", "IE", "점수", "시나리오", "AJAX", "벤더/신호", "사유"],
+    model.ieModePageRows.slice(0, 80).map(function (r) {
+      return [
+        r.page,
+        '<span class="badge ' + parityTone(r.level) + '">' + htmlEsc(r.level) + "</span>",
+        r.localLabConfidence, r.needsSpringTomcat, r.needsIeMode, r.score, r.scenarios, r.ajax,
+        r.vendors || "-", r.reasons || "-"
+      ];
+    }), true));
+  parts.push("<h2>항목별 parity 판정</h2>");
+  parts.push(tableHtml(["ID", "시나리오", "단계", "페이지", "근거", "유형", "판정", "Spring", "IE", "사유", "권장 확인"],
+    model.runtimeParityRows.slice(0, 200).map(function (r) {
+      return [
+        r.id, r.scenarioId || "-", stageLabel(r.stage), r.page || "-", r.findingRel + ":" + r.line,
+        r.category + " / " + r.priority,
+        '<span class="badge ' + parityTone(r.level) + '">' + htmlEsc(r.level) + "</span>",
+        r.needsSpringTomcat, r.needsIeMode, r.reason, r.recommendation
+      ];
+    }), true));
+  parts.push("</main></body></html>");
+  writeUtf8(path.join(model.reportRoot, "runtime_parity.html"), parts.join("\n"), false);
+}
+
 function scriptJson(v) {
   return JSON.stringify(v).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 }
@@ -4056,7 +4333,7 @@ function writeIndexHtml(model) {
   parts.push("*{box-sizing:border-box}body{font-family:'Malgun Gothic',AppleGothic,sans-serif;margin:0;background:#eef2f6;color:#202733}.shell{max-width:1440px;margin:0 auto;padding:24px}h1{font-size:22px;line-height:1.25;margin:0;color:#151b24}h2{font-size:15px;margin:24px 0 10px;color:#1f2937}.topbar{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:18px 20px;display:flex;justify-content:space-between;gap:20px;box-shadow:0 8px 22px rgba(31,41,55,.06)}.eyebrow{font-size:11px;font-weight:700;letter-spacing:.04em;color:#5b6677;text-transform:uppercase}.subtitle{margin-top:8px;font-size:12px;color:#5b6677;word-break:break-all}.metaPills{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;min-width:260px}.pill{border:1px solid #d7ddea;border-radius:999px;background:#f7f9fc;color:#344054;font-size:12px;padding:5px 9px;white-space:nowrap}");
   parts.push(".cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}.card{background:#fff;border:1px solid #d8dee8;border-left:4px solid var(--accent);border-radius:8px;padding:11px 14px;min-width:0;box-shadow:0 4px 14px rgba(31,41,55,.04)}.card .v{font-size:24px;line-height:1.1;font-weight:800;color:#101828}.card .l{font-size:12px;color:#667085;margin-top:4px}a{color:#1a5fb4;text-decoration:none}a:hover{text-decoration:underline}.small{font-size:12px;color:#5b6677}.tableWrap,.queueTable{overflow:auto;border:1px solid #dfe5ef;border-radius:8px;background:#fff;margin-top:8px}table{border-collapse:collapse;background:#fff;font-size:12px;width:100%}th,td{border-bottom:1px solid #e6ebf2;padding:7px 9px;text-align:left;word-break:break-all;vertical-align:top}th{background:#f5f7fb;color:#344054;font-weight:700}tr:last-child td{border-bottom:0}.warn{color:#b26a00}.crit{color:#b00020;font-weight:bold}.ok{color:#1b5e20}.distGrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.barCell{position:relative;min-width:90px;background:#eef2f6;border-radius:6px;overflow:hidden;height:20px}.barCell span{position:absolute;left:0;top:0;bottom:0;background:#b7c6d9}.barCell b{position:relative;z-index:1;display:block;text-align:right;padding:2px 7px;color:#1f2937}");
   parts.push(".stageFocus{background:#fff;border:1px solid #d8dee8;border-left:4px solid #78909c;border-radius:8px;margin-top:12px;padding:14px;box-shadow:0 6px 18px rgba(31,41,55,.05)}.stageFocus.danger{border-left-color:#b42318}.stageFocus.warn{border-left-color:#b54708}.stageFocus.calm{border-left-color:#4e5f70}.stageHead{display:flex;align-items:center;justify-content:space-between;gap:12px}.stageHead b{font-size:16px;color:#1f2937}.stageHead span{margin-left:8px;font-size:11px;color:#5b6677;border:1px solid #d7ddea;border-radius:999px;padding:2px 8px;background:#f7f9fc}.stageCounts{display:flex;gap:8px;flex-shrink:0}.stageCounts div{min-width:58px;border:1px solid #dfe5ef;border-radius:8px;background:#f8fafc;padding:6px 8px;text-align:right}.stageCounts b{display:block;font-size:20px;line-height:1;color:#101828}.stageCounts span{display:block;margin:3px 0 0;border:0;background:transparent;padding:0;color:#667085}.stageBody{display:grid;grid-template-columns:minmax(260px,.42fr) minmax(0,1fr);gap:14px;margin-top:12px}.stagePlan{background:#f8fafc;border:1px solid #e3e8f0;border-radius:8px;padding:11px}.stageLine{font-size:12px;color:#5b6677;margin-top:9px}.stageLine:first-child{margin-top:0}.stageLine b,.stageFiles b{color:#344054}.stageFiles{font-size:12px;margin-top:10px;color:#5b6677}.stageQueue{min-width:0}.queueHint{margin-top:4px}.subHead{display:flex;justify-content:space-between;gap:10px;align-items:center;margin:10px 0 5px}.subHead b{font-size:13px;color:#344054}.subHead span{font-size:11px;color:#667085}.status{display:inline-block;border-radius:999px;border:1px solid #d7ddea;padding:2px 7px;font-size:11px;white-space:nowrap}.status.changed{border-color:#7a2e0e;background:#fff4ed;color:#b42318}.status.same{background:#f8fafc;color:#667085}.status.missing{background:#fef7c3;color:#93370d}.emptyQueue{border:1px dashed #cfd7e3;border-radius:8px;background:#f8fafc;color:#667085;font-size:12px;padding:12px}");
-  parts.push("details{background:#fff;border:1px solid #d8dee8;border-radius:8px;margin-top:14px;padding:10px 12px}summary{cursor:pointer;font-weight:800;color:#1f2937}.detailBlock{margin-top:10px}.filelink{border:0;background:transparent;color:#1a5fb4;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;padding:0}.modalBackdrop{position:fixed;inset:0;background:rgba(15,23,42,.58);z-index:1000;display:none}.modalBox{position:absolute;inset:4%;background:#fff;border:1px solid #344054;border-radius:8px;box-shadow:0 20px 60px rgba(15,23,42,.35);display:flex;flex-direction:column}.modalHead{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #d8dee8;background:#f5f7fb}.modalTitle{font-weight:800}.modalClose{border:1px solid #98a2b3;border-radius:6px;background:#fff;padding:5px 11px;cursor:pointer}.modalBody{padding:12px;overflow:auto}.detailGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.infoGrid{display:grid;grid-template-columns:130px 1fr;gap:5px 10px;font-size:12px;margin-bottom:12px}.infoGrid div:nth-child(odd){font-weight:800;color:#475467}.pane{border:1px solid #d8dee8;border-radius:8px;background:#fbfcfe;overflow:hidden}.pane h3{font-size:13px;margin:0;padding:7px 9px;background:#f3f6fa;border-bottom:1px solid #d8dee8}.codeLine{display:grid;grid-template-columns:46px 1fr;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap}.codeLine .ln{color:#667085;text-align:right;padding:0 8px;border-right:1px solid #e4e9f1;user-select:none}.codeLine .txt{padding:0 8px}.codeLine.hit{background:#fff4cf}.noteBox{font:12px Consolas,Menlo,monospace;padding:10px;color:#667085}@media(max-width:1100px){.cards{grid-template-columns:repeat(3,minmax(0,1fr))}.stageBody{grid-template-columns:1fr}.topbar{display:block}.metaPills{justify-content:flex-start;margin-top:12px}}@media(max-width:700px){.shell{padding:14px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.stageHead{align-items:flex-start}.stageCounts{display:grid;grid-template-columns:1fr 1fr}.detailGrid{grid-template-columns:1fr}.modalBox{inset:2%}}");
+	  parts.push("details{background:#fff;border:1px solid #d8dee8;border-radius:8px;margin-top:14px;padding:10px 12px}summary{cursor:pointer;font-weight:800;color:#1f2937}.detailBlock{margin-top:10px}.badge{border-radius:999px;border:1px solid #d7ddea;background:#f8fafc;padding:2px 7px;font-size:11px;white-space:nowrap}.badge.ok{border-color:#a6d8b3;background:#f0fff4;color:#166534}.badge.warn{border-color:#ffd08a;background:#fff7e6;color:#b54708}.badge.bad{border-color:#ffb4a8;background:#fff1ef;color:#b42318}.filelink{border:0;background:transparent;color:#1a5fb4;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;padding:0}.modalBackdrop{position:fixed;inset:0;background:rgba(15,23,42,.58);z-index:1000;display:none}.modalBox{position:absolute;inset:4%;background:#fff;border:1px solid #344054;border-radius:8px;box-shadow:0 20px 60px rgba(15,23,42,.35);display:flex;flex-direction:column}.modalHead{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #d8dee8;background:#f5f7fb}.modalTitle{font-weight:800}.modalClose{border:1px solid #98a2b3;border-radius:6px;background:#fff;padding:5px 11px;cursor:pointer}.modalBody{padding:12px;overflow:auto}.detailGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.infoGrid{display:grid;grid-template-columns:130px 1fr;gap:5px 10px;font-size:12px;margin-bottom:12px}.infoGrid div:nth-child(odd){font-weight:800;color:#475467}.pane{border:1px solid #d8dee8;border-radius:8px;background:#fbfcfe;overflow:hidden}.pane h3{font-size:13px;margin:0;padding:7px 9px;background:#f3f6fa;border-bottom:1px solid #d8dee8}.codeLine{display:grid;grid-template-columns:46px 1fr;font:12px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap}.codeLine .ln{color:#667085;text-align:right;padding:0 8px;border-right:1px solid #e4e9f1;user-select:none}.codeLine .txt{padding:0 8px}.codeLine.hit{background:#fff4cf}.noteBox{font:12px Consolas,Menlo,monospace;padding:10px;color:#667085}@media(max-width:1100px){.cards{grid-template-columns:repeat(3,minmax(0,1fr))}.stageBody{grid-template-columns:1fr}.topbar{display:block}.metaPills{justify-content:flex-start;margin-top:12px}}@media(max-width:700px){.shell{padding:14px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.stageHead{align-items:flex-start}.stageCounts{display:grid;grid-template-columns:1fr 1fr}.detailGrid{grid-template-columns:1fr}.modalBox{inset:2%}}");
   parts.push("</style></head><body><main class=\"shell\">");
   parts.push('<section class="topbar"><div><div class="eyebrow">' + htmlEsc(TOOL_NAME + " v" + TOOL_VERSION) + '</div><h1>jQuery ' + htmlEsc(CVE_ID) + ' 조치 보고서</h1><div class="subtitle">Source: ' + htmlEsc(c.SourceRoot) + " / WebContent: " + htmlEsc(c.WebContentRoot) + " / Target: " + htmlEsc(c.TargetRoot) + '</div></div><div class="metaPills"><span class="pill">Mode ' + htmlEsc(c.Mode) + '</span><span class="pill">Target ' + htmlEsc(c.JqueryTargetVersion) + '</span><span class="pill">Pass ' + htmlEsc(c.JqueryFloorVersion) + '+</span></div></section>');
   parts.push('<h2>요약</h2><div class="cards">');
@@ -4071,15 +4348,24 @@ function writeIndexHtml(model) {
   parts.push("<h2>단계별 조치 큐 (로드맵 + FocusQueue 상위 100건)</h2>");
   parts.push('<div class="small queueHint">1차 최소부터 확인하세요. 각 단계 안에서 목표와 멈춤 기준을 보고, 파일명을 클릭하면 AS-IS/TO-BE 주변 코드와 확인 포인트가 모달로 열립니다.</div>');
   parts.push(focusQueueHtml(model, focusDetails, autoDetails));
-  if (model.runtimeScenarios.length > 0) {
-    parts.push("<h2>Edge IE mode 수동 검증 시나리오</h2>");
-    parts.push('<div class="small">IEDriver 없이도 로컬/개발계 브라우저에서 사람이 확인할 동작입니다. 상세: ' + reportLink("runtime_scenarios.html", "runtime_scenarios.html") + " / " + reportLink("runtimeScenarios.csv", "runtimeScenarios.csv") + " / " + reportLink("selectorElementMap.csv", "selectorElementMap.csv") + "</div>");
-    parts.push(tableHtml(["ID", "단계", "화면/파일", "대상", "유형", "동작", "통과 기준"],
-      model.runtimeScenarios.slice(0, 20).map(function (s) {
-        return [s.id, stageLabel(s.stage), s.page || s.findingRel, s.uiTarget || s.selector || "-", s.category, s.action, s.passWhen];
-      })));
-  }
-  parts.push("<details><summary>상세 표 펼치기</summary><div class=\"detailBlock\">");
+	  if (model.runtimeScenarios.length > 0) {
+	    parts.push("<h2>Edge IE mode 수동 검증 시나리오</h2>");
+	    parts.push('<div class="small">IEDriver 없이도 로컬/개발계 브라우저에서 사람이 확인할 동작입니다. 상세: ' + reportLink("runtime_scenarios.html", "runtime_scenarios.html") + " / " + reportLink("runtimeScenarios.csv", "runtimeScenarios.csv") + " / " + reportLink("selectorElementMap.csv", "selectorElementMap.csv") + "</div>");
+	    parts.push(tableHtml(["ID", "단계", "화면/파일", "대상", "유형", "동작", "통과 기준"],
+	      model.runtimeScenarios.slice(0, 20).map(function (s) {
+	        return [s.id, stageLabel(s.stage), s.page || s.findingRel, s.uiTarget || s.selector || "-", s.category, s.action, s.passWhen];
+	      })));
+	  }
+	  if (model.runtimeParityRows.length > 0) {
+	    parts.push("<h2>Runtime Parity 분석</h2>");
+	    parts.push('<div class="small">Local Lab/mock 결과를 어디까지 믿을지, Spring/Tomcat 또는 Edge IE mode 확인이 필요한지 분류합니다. 상세: ' + reportLink("runtime_parity.html", "runtime_parity.html") + " / " + reportLink("runtimeParity.csv", "runtimeParity.csv") + " / " + reportLink("ieModeRisk.csv", "ieModeRisk.csv") + "</div>");
+	    parts.push(tableHtml(["판정", "건수", "의미"], [
+	      ['<span class="badge ok">LOCAL_LAB_OK</span>', c.RuntimeParityLocalOk, "구조적 jQuery API 변경 위주. Local Lab/정적 diff 신뢰 높음"],
+	      ['<span class="badge warn">SPRING_TOMCAT_REQUIRED</span>', c.RuntimeParitySpringTomcat, "JSP include/AJAX/서버 데이터가 개입. 실제 Spring/Tomcat에서 확인"],
+	      ['<span class="badge bad">IE_MODE_REQUIRED</span>', c.RuntimeParityIeMode, "legacy plugin/ActiveX/iframe/popup/file upload/IE 분기 등. Windows Edge IE mode에서 확인"]
+	    ], true));
+	  }
+	  parts.push("<details><summary>상세 표 펼치기</summary><div class=\"detailBlock\">");
   parts.push("<h2>1차 상세: " + TARGET_JQUERY_FLOOR_VERSION + " 미만 jQuery core 호출부 (" + model.oldCoreRefs.length + "건)</h2>");
   parts.push(tableHtml(["페이지", "라인", "src", "버전"], model.oldCoreRefs.map(function (r) { return [r.page, r.line, r.raw, r.meta.ver]; })));
   parts.push('<div class="small">이 항목은 plan/autofix에서는 자동 변경되지 않습니다. ' + htmlEsc(model.profile.jquery.coreFile) + " / " + htmlEsc(model.profile.jquery.migrateFile) + ' 파일을 WebContent/js에 넣은 뒤 patch-jquery 모드로 교체하세요.</div>');
@@ -4110,7 +4396,7 @@ function writeIndexHtml(model) {
   parts.push("<h2>다음 액션</h2><ol>");
   recommendedActions(model).forEach(function (a) { parts.push("<li>" + htmlEsc(a) + "</li>"); });
   parts.push("</ol></div></details>");
-  parts.push('<div class="small">복붙 패킷: ' + reportLink("voyager_packet.txt", "voyager_packet.txt") + ' / 상세 데이터: apiFindings.csv / findingCategorySummary.csv / directoryRiskSummary.csv / focusQueue.csv / jspPages.csv / pageScriptEffective.csv / ajaxToServerMap.csv / airgap_manifest.txt / jquery35_report.xls</div>');
+	  parts.push('<div class="small">복붙 패킷: ' + reportLink("voyager_packet.txt", "voyager_packet.txt") + ' / 상세 데이터: apiFindings.csv / findingCategorySummary.csv / directoryRiskSummary.csv / runtimeParity.csv / ieModeRisk.csv / focusQueue.csv / jspPages.csv / pageScriptEffective.csv / ajaxToServerMap.csv / airgap_manifest.txt / jquery35_report.xls</div>');
   parts.push("</main>");
   parts.push('<div id="focusDetailModal" class="modalBackdrop" onclick="if(event.target===this) closeFocusDetail();"><div class="modalBox"><div class="modalHead"><div id="focusModalTitle" class="modalTitle"></div><button type="button" class="modalClose" onclick="closeFocusDetail()">Close</button></div><div class="modalBody"><div id="focusModalInfo" class="infoGrid"></div><div class="detailGrid"><div class="pane"><h3>AS-IS</h3><div id="focusAsIs"></div></div><div class="pane"><h3>TO-BE</h3><div id="focusToBe"></div></div></div></div></div></div>');
   parts.push("<script>window.__JQ35_FOCUS_DETAILS__=" + scriptJson(modalDetails) + ";\n(function(){function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c];});}function block(sn){if(!sn||!sn.available){return '<div class=\"noteBox\">'+esc(sn&&sn.note?sn.note:'not available')+'</div>';}return sn.rows.map(function(r){return '<div class=\"codeLine '+(r.hit?'hit':'')+'\"><span class=\"ln\">'+esc(r.n)+'</span><span class=\"txt\">'+esc(r.text)+'</span></div>';}).join('');}window.openFocusDetail=function(i){var d=window.__JQ35_FOCUS_DETAILS__[i];if(!d)return;document.getElementById('focusModalTitle').textContent='#'+d.rank+' '+d.rel+':'+d.line;document.getElementById('focusModalInfo').innerHTML='<div>목록</div><div>'+esc(d.sourceKind)+'</div><div>TO-BE 상태</div><div>'+esc(d.toBeStatus)+'</div><div>유형</div><div>'+esc(d.category)+' / '+esc(d.priority)+' / '+esc(d.confidence)+'</div><div>패턴</div><div>'+esc(d.pattern)+'</div><div>왜 문제인가</div><div>'+esc(d.reason)+'</div><div>어떻게 바꾸나</div><div>'+esc(d.change)+'</div><div>확인할 것</div><div>'+esc(d.verify)+'</div>';document.getElementById('focusAsIs').innerHTML=block(d.asIs);document.getElementById('focusToBe').innerHTML=block(d.toBe);document.getElementById('focusDetailModal').style.display='block';};window.closeFocusDetail=function(){document.getElementById('focusDetailModal').style.display='none';};document.addEventListener('keydown',function(e){if(e.key==='Escape')closeFocusDetail();});})();</script>");
@@ -4127,8 +4413,9 @@ function recommendedActions(model) {
   if (c.XssHigh > 0) out.push("XssHigh " + c.XssHigh + "건 DOM XSS 검토: .text()/escapeHtml 적용 또는 신뢰 경계 확인 (jQuery 업그레이드만으로는 미해결)");
   if (c.VendorReview > 0) out.push("벤더 라이브러리(jqGrid/jquery-ui/select2/autoNumeric)는 직접 수정하지 말고 Migrate 상태에서 화면 테스트 및 호환 버전 검토");
   if (c.PageRiskMigrateMissing > 0) out.push("Migrate 누락 페이지 " + c.PageRiskMigrateMissing + "건에 jquery-migrate 추가");
-  if (c.Manual + c.Review > 5) out.push("review-pack 모드로 애매한 코드 지점(현재 " + c.ReviewCasesTotal + "그룹) 질문지를 뽑아 외부 AI와 반복 학습 (learnedWrappers/learnedFindings로 project-profile.json에 누적)");
-  out.push("probe 모드로 Runtime Probe를 삽입해 Edge IE mode에서 JQMIGRATE 경고/JS 오류를 화면에서 수집");
+	  if (c.Manual + c.Review > 5) out.push("review-pack 모드로 애매한 코드 지점(현재 " + c.ReviewCasesTotal + "그룹) 질문지를 뽑아 외부 AI와 반복 학습 (learnedWrappers/learnedFindings로 project-profile.json에 누적)");
+	  if (c.RuntimeParitySpringTomcat + c.RuntimeParityIeMode > 0) out.push("runtime_parity.html에서 Local Lab으로 충분한 항목과 Spring/Tomcat 또는 Edge IE mode가 필요한 항목을 분리해 검증 범위를 줄이세요");
+	  out.push("probe 모드로 Runtime Probe를 삽입해 Edge IE mode에서 JQMIGRATE 경고/JS 오류를 화면에서 수집");
   out.push("운영 반영 전 verify-clean 모드 실행 (probe 잔존/구버전 jQuery 잔존 시 FAIL)");
   return out;
 }
@@ -4143,7 +4430,9 @@ function packetLines(model) {
     "ChangedFiles", "ApiFindings", "Critical", "AutoFixed", "AutoInferred", "Review", "Manual", "XssHigh", "FocusQueue",
     "VendorReview", "StaticHtmlLow", "JqueryLoads", "OldJqueryBelow350", "PageRiskMultipleJqueryCore",
     "PageRiskOldJqueryCore", "PageRiskMigrateMissing", "PageRiskMigrateBeforeCore", "UnresolvedRefs", "AjaxEndpoints", "JsSyntaxFail",
-    "ServerFiles", "ServerEndpoints", "AjaxMappedToServer", "UiElements", "SelectorElementRows", "RuntimeScenarios", "ReviewCasesTotal", "ReviewCasesInPack", "LearnedWrapperCount", "LearnedFindingOverrides",
+	    "ServerFiles", "ServerEndpoints", "AjaxMappedToServer", "UiElements", "SelectorElementRows", "RuntimeScenarios",
+	    "RuntimeParityRows", "RuntimeParityLocalOk", "RuntimeParitySpringTomcat", "RuntimeParityIeMode", "IeModeRiskPages", "SpringRuntimePages",
+	    "ReviewCasesTotal", "ReviewCasesInPack", "LearnedWrapperCount", "LearnedFindingOverrides",
     "LibraryCounts", "GitInfo", "OldJquerySrcs"].forEach(function (k) {
       L.push(k + "=" + c[k]);
     });
@@ -4220,11 +4509,14 @@ function voyagerPacketLines(model) {
     "|auto=" + (c.AutoFixed + c.AutoInferred) +
     "|manual=" + c.Manual +
     "|review=" + c.Review +
-    "|xss=" + c.XssHigh +
-    "|focus=" + c.FocusQueue +
-    "|runtime=" + c.RuntimeScenarios +
-    "|ui=" + c.UiElements +
-    "|selectorRows=" + c.SelectorElementRows);
+	    "|xss=" + c.XssHigh +
+	    "|focus=" + c.FocusQueue +
+	    "|runtime=" + c.RuntimeScenarios +
+	    "|parityLocal=" + c.RuntimeParityLocalOk +
+	    "|paritySpring=" + c.RuntimeParitySpringTomcat +
+	    "|parityIe=" + c.RuntimeParityIeMode +
+	    "|ui=" + c.UiElements +
+	    "|selectorRows=" + c.SelectorElementRows);
   L.push("COUNTS|oldJq=" + c.OldJqueryBelow350 +
     "|jqLoads=" + c.JqueryLoads +
     "|multiCorePages=" + c.PageRiskMultipleJqueryCore +
@@ -4232,8 +4524,10 @@ function voyagerPacketLines(model) {
     "|migrateBeforeCore=" + c.PageRiskMigrateBeforeCore +
     "|ajax=" + c.AjaxEndpoints +
     "|serverEndpoints=" + c.ServerEndpoints +
-    "|ajaxMapped=" + c.AjaxMappedToServer +
-    "|vendor=" + c.VendorReview);
+	    "|ajaxMapped=" + c.AjaxMappedToServer +
+	    "|vendor=" + c.VendorReview +
+	    "|springPages=" + c.SpringRuntimePages +
+	    "|iePages=" + c.IeModeRiskPages);
   buildScopeRows(model).forEach(function (s) {
     L.push("STAGE|" + packetField(stageLabel(s.key), 20) +
       "|total=" + s.count +
@@ -4272,7 +4566,7 @@ function voyagerPacketLines(model) {
       "|why=" + packetField(f.reason, 180) +
       "|fix=" + packetField(f.suggestion || f.after || "", 160));
   });
-  model.runtimeScenarios.slice(0, 80).forEach(function (s) {
+	  model.runtimeScenarios.slice(0, 80).forEach(function (s) {
     L.push("RT|" + s.id +
       "|stage=" + packetField(stageLabel(s.stage), 20) +
       "|page=" + packetField(shortReviewPath(s.page || s.findingRel), 100) +
@@ -4281,9 +4575,26 @@ function voyagerPacketLines(model) {
       "|pri=" + packetField(s.priority, 20) +
       "|target=" + packetField(s.uiTarget || s.selector || "-", 140) +
       "|do=" + packetField(s.action, 220) +
-      "|pass=" + packetField(s.passWhen, 180));
-  });
-  model.selectorElementRows.filter(function (r) { return r.element; }).slice(0, 60).forEach(function (r) {
+	      "|pass=" + packetField(s.passWhen, 180));
+	  });
+	  model.ieModePageRows.slice(0, 40).forEach(function (r) {
+	    L.push("PARITY_PAGE|" + packetField(shortReviewPath(r.page), 100) +
+	      "|level=" + packetField(r.level, 30) +
+	      "|spring=" + r.needsSpringTomcat +
+	      "|ie=" + r.needsIeMode +
+	      "|score=" + r.score +
+	      "|why=" + packetField(r.reasons || "-", 180));
+	  });
+	  model.runtimeParityRows.slice(0, 60).forEach(function (r) {
+	    L.push("PARITY|" + packetField(r.id, 12) +
+	      "|rt=" + packetField(r.scenarioId || "-", 12) +
+	      "|level=" + packetField(r.level, 30) +
+	      "|page=" + packetField(shortReviewPath(r.page || r.findingRel), 100) +
+	      "|find=" + packetField(shortReviewPath(r.findingRel) + ":" + r.line, 100) +
+	      "|cat=" + packetField(r.category, 45) +
+	      "|why=" + packetField(r.reason, 180));
+	  });
+	  model.selectorElementRows.filter(function (r) { return r.element; }).slice(0, 60).forEach(function (r) {
     L.push("SEL|" + packetField(shortReviewPath(r.rel) + ":" + r.line, 100) +
       "|selector=" + packetField(r.selector, 80) +
       "|page=" + packetField(shortReviewPath(r.page), 100) +
@@ -4328,8 +4639,10 @@ function writeChatSummary(model) {
   L.push("- DOM XSS 고위험(XssHigh): " + c.XssHigh + "건 (jQuery 업그레이드와 별개로 조치 필요)");
   L.push("- 벤더 검토(VendorReview): " + c.VendorReview + "건 (jqGrid/jquery-ui/select2/autoNumeric 등, 직접 수정 금지)");
   L.push("- 정적 HTML 저위험: " + c.StaticHtmlLow + "건 (조치 불필요 후보)");
-  L.push("- 사람이 봐야 할 FocusQueue: " + c.FocusQueue + "건");
-  L.push("- 서버 정적 증거: Java/XML " + c.ServerFiles + "개 파일, Controller endpoint " + c.ServerEndpoints + "건, AJAX 매핑 " + c.AjaxMappedToServer + "/" + c.AjaxEndpoints + "건");
+	  L.push("- 사람이 봐야 할 FocusQueue: " + c.FocusQueue + "건");
+	  L.push("- 서버 정적 증거: Java/XML " + c.ServerFiles + "개 파일, Controller endpoint " + c.ServerEndpoints + "건, AJAX 매핑 " + c.AjaxMappedToServer + "/" + c.AjaxEndpoints + "건");
+	  L.push("- Runtime parity: LocalLab " + c.RuntimeParityLocalOk + "건 / Spring-Tomcat " + c.RuntimeParitySpringTomcat + "건 / IE mode " + c.RuntimeParityIeMode + "건");
+	  L.push("- 페이지 검증범위: Spring/Tomcat 필요 " + c.SpringRuntimePages + "개 / IE mode 리스크 " + c.IeModeRiskPages + "개");
   L.push("");
   L.push("페이지 리스크");
   L.push("- jQuery core 중복 로드 페이지: " + c.PageRiskMultipleJqueryCore);
@@ -4480,10 +4793,49 @@ function writeRuntimeChecklist(model) {
   L.push("- jqGrid/select2/autoNumeric/datepicker 동작");
   L.push("");
   L.push("[자동 생성 시나리오 상위 " + Math.min(30, model.runtimeScenarios.length) + "건]");
-  model.runtimeScenarios.slice(0, 30).forEach(function (s) {
-    L.push("- " + s.id + " " + stageLabel(s.stage) + " " + (s.page || s.findingRel) + " :: " + s.action + " / PASS: " + s.passWhen);
-  });
-  writeUtf8(path.join(model.reportRoot, "runtime_test_checklist.txt"), L.join("\r\n") + "\r\n", true);
+	  model.runtimeScenarios.slice(0, 30).forEach(function (s) {
+	    L.push("- " + s.id + " " + stageLabel(s.stage) + " " + (s.page || s.findingRel) + " :: " + s.action + " / PASS: " + s.passWhen);
+	  });
+	  L.push("");
+	  L.push("[Runtime Parity]");
+	  L.push("- Local Lab OK: " + model.counters.RuntimeParityLocalOk + " / Spring-Tomcat required: " + model.counters.RuntimeParitySpringTomcat + " / IE mode required: " + model.counters.RuntimeParityIeMode);
+	  L.push("- 상세: runtime_parity.html, runtimeParity.csv, ieModeRisk.csv");
+	  writeUtf8(path.join(model.reportRoot, "runtime_test_checklist.txt"), L.join("\r\n") + "\r\n", true);
+}
+
+function writeRuntimeLabGuide(model) {
+  const L = [];
+  L.push("# Runtime Lab Guide");
+  L.push("");
+  L.push("생성: " + TOOL_NAME + " v" + TOOL_VERSION);
+  L.push("");
+  L.push("## 목적");
+  L.push("");
+  L.push("- 이 가이드는 폐쇄망 반입물이 아니라 Codex/로컬 개발 PC에서 무겁게 실험할 때 쓰는 선택형 안내입니다.");
+  L.push("- 본체 ZIP에는 Docker image, JDK, Tomcat, Maven을 포함하지 않습니다.");
+  L.push("- 목표는 Local Lab/mock 판정과 실제 Spring/Tomcat 구동 결과의 차이를 줄이고, IE mode 실검증 대상을 정확히 줄이는 것입니다.");
+  L.push("");
+  L.push("## 현재 보고서 기준");
+  L.push("");
+  L.push("- Local Lab 신뢰 높음: " + model.counters.RuntimeParityLocalOk);
+  L.push("- Spring/Tomcat 실기동 필요: " + model.counters.RuntimeParitySpringTomcat + " / 페이지 " + model.counters.SpringRuntimePages);
+  L.push("- Windows Edge IE mode 필요: " + model.counters.RuntimeParityIeMode + " / 페이지 " + model.counters.IeModeRiskPages);
+  L.push("");
+  L.push("## 권장 실험 흐름");
+  L.push("");
+  L.push("1. Eclipse 또는 빌드 도구로 TO-BE WAR를 만듭니다. 빌드가 어렵다면 WebContent만으로 Local Lab을 먼저 유지합니다.");
+  L.push("2. runtime-lab/inbox/app.war 위치에 WAR를 둡니다. Docker를 쓸 수 있으면 runtime-lab/docker-compose.tomcat7.yml을 사용합니다.");
+  L.push("3. 브라우저에서 http://127.0.0.1:18089/ 로 접속해 Probe 배지의 jQuery/Migrate/JSERROR/AJAXERROR를 확인합니다.");
+  L.push("4. runtime_parity.html의 SPRING_TOMCAT_REQUIRED 항목부터 확인하고, IE_MODE_REQUIRED 항목은 Windows Edge IE mode에서 최종 확인합니다.");
+  L.push("5. 복사 가능한 결과는 voyager_packet.txt 또는 Probe Copy 로그로 외부 Codex에 전달합니다.");
+  L.push("");
+  L.push("## Docker 실험의 한계");
+  L.push("");
+  L.push("- tomcat:7.0.109-jdk8-openjdk 이미지는 대략 수백 MB 규모입니다. 본체 반입 ZIP에 넣지 않습니다.");
+  L.push("- Mac arm64에서는 linux/amd64 에뮬레이션이 필요할 수 있습니다.");
+  L.push("- JEUS/WebtoB, 세션, 인증, DB, 파일스토리지, 레거시 미들웨어 기능은 Tomcat Docker로 완전 재현되지 않습니다.");
+  L.push("- IE mode 렌더링은 Windows Edge에서만 확인 가능합니다.");
+  writeUtf8(path.join(model.reportRoot, "runtime_lab_guide.md"), L.join("\n") + "\n", true);
 }
 
 function writeSampleProfile(model) {
@@ -4892,10 +5244,16 @@ function releaseCandidateFiles() {
     "실행4_프로브포함.bat",
     "실행5_로컬랩서버.bat",
     "실행6_운영반영전검증.bat",
-    "실행7_AI리뷰팩.bat",
-    "실행8_폐쇄망증빙.bat",
-    "실행9_배포ZIP생성.bat"
-  ];
+	    "실행7_AI리뷰팩.bat",
+	    "실행8_폐쇄망증빙.bat",
+	    "실행9_배포ZIP생성.bat",
+	    "runtime-lab/README_RUNTIME_LAB_KO.md",
+	    "runtime-lab/docker-compose.tomcat7.yml",
+	    "runtime-lab/Dockerfile.tomcat7",
+	    "runtime-lab/run-runtime-lab.sh",
+	    "runtime-lab/run-runtime-lab.bat",
+	    "runtime-lab/inbox/README.txt"
+	  ];
   const rulesDir = path.join(root, "rules");
   if (isDir(rulesDir)) {
     fs.readdirSync(rulesDir).sort().forEach(function (name) {
@@ -4936,13 +5294,16 @@ function writeAirgapManifest(model) {
     rulepackFiles: model ? (model.profile.rulepackFiles || []).map(function (f) {
       return { path: f, sha256: exists(f) ? sha256File(f) : "" };
     }) : [],
-    reportCounters: model ? {
-      totalFiles: model.counters.TotalFiles,
-      apiFindings: model.counters.ApiFindings,
-      focusQueue: model.counters.FocusQueue,
-      serverEndpoints: model.counters.ServerEndpoints,
-      ajaxMappedToServer: model.counters.AjaxMappedToServer
-    } : {},
+	    reportCounters: model ? {
+	      totalFiles: model.counters.TotalFiles,
+	      apiFindings: model.counters.ApiFindings,
+	      focusQueue: model.counters.FocusQueue,
+	      serverEndpoints: model.counters.ServerEndpoints,
+	      ajaxMappedToServer: model.counters.AjaxMappedToServer,
+	      runtimeParityLocalOk: model.counters.RuntimeParityLocalOk,
+	      runtimeParitySpringTomcat: model.counters.RuntimeParitySpringTomcat,
+	      runtimeParityIeMode: model.counters.RuntimeParityIeMode
+	    } : {},
     releaseFiles: fileManifestRows(releaseFiles)
   };
   const R = model && model.reportRoot ? model.reportRoot : path.join(process.cwd(), "release");
@@ -5090,22 +5451,24 @@ function writeAllReports(model, extra) {
   writeIndexHtml(model);
   writePacket(model);
   writeChatSummary(model);
-  writeSampleProfile(model);
-  writeRuntimeChecklist(model);
-  writeRecommendedCommits(model);
+	  writeSampleProfile(model);
+	  writeRuntimeChecklist(model);
+	  writeRuntimeLabGuide(model);
+	  writeRecommendedCommits(model);
   writeAirgapManifest(model);
   if (!model.opts["no-lab"]) writeMockFiles(model);
   if (extra && extra.pr) writePrReport(model);
-  log("report written: " + model.reportRoot);
-  log("  - index.html (dashboard), summary.csv, apiFindings.csv, findingCategorySummary.csv, directoryRiskSummary.csv, focusQueue.csv, jquery35_report.xls");
-  log("  - runtime_scenarios.html / runtimeScenarios.csv / uiElementInventory.csv / selectorElementMap.csv");
-  log("  - voyager_packet.txt / assistant_packet.txt / chat_summary.txt / airgap_manifest.txt");
+	  log("report written: " + model.reportRoot);
+	  log("  - index.html (dashboard), summary.csv, apiFindings.csv, findingCategorySummary.csv, directoryRiskSummary.csv, focusQueue.csv, jquery35_report.xls");
+	  log("  - runtime_scenarios.html / runtimeScenarios.csv / uiElementInventory.csv / selectorElementMap.csv");
+	  log("  - runtime_parity.html / runtimeParity.csv / ieModeRisk.csv / runtime_lab_guide.md");
+	  log("  - voyager_packet.txt / assistant_packet.txt / chat_summary.txt / airgap_manifest.txt");
 }
 const MIME = {
   ".html": "text/html", ".htm": "text/html", ".js": "application/javascript",
   ".css": "text/css", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
   ".gif": "image/gif", ".svg": "image/svg+xml", ".ico": "image/x-icon",
-  ".json": "application/json", ".txt": "text/plain", ".woff": "font/woff",
+	  ".json": "application/json", ".txt": "text/plain", ".md": "text/markdown", ".yml": "text/yaml", ".yaml": "text/yaml", ".woff": "font/woff",
   ".woff2": "font/woff2", ".ttf": "font/ttf", ".map": "application/json", ".xls": "application/vnd.ms-excel", ".csv": "text/csv"
 };
 
@@ -5606,10 +5969,14 @@ function uiReportFileList(state) {
   const R = state.report || "";
   const files = [
     ["index.html", "Main report", "report"],
-    ["jquery35_report.xls", "Excel report", "report"],
-    ["voyager_packet.txt", "Voyager copy packet", "report"],
-    ["assistant_packet.txt", "Assistant packet", "report"],
-    ["focusQueue.csv", "Focus queue", "queue"],
+	    ["jquery35_report.xls", "Excel report", "report"],
+	    ["voyager_packet.txt", "Voyager copy packet", "report"],
+	    ["assistant_packet.txt", "Assistant packet", "report"],
+	    ["runtime_parity.html", "Runtime parity", "lab"],
+	    ["runtimeParity.csv", "Runtime parity CSV", "lab"],
+	    ["ieModeRisk.csv", "IE mode risk CSV", "lab"],
+	    ["runtime_lab_guide.md", "Runtime lab guide", "lab"],
+	    ["focusQueue.csv", "Focus queue", "queue"],
     ["autoFixed.csv", "Auto fixes", "queue"],
     ["manualQueue.csv", "Manual queue", "queue"],
     ["serverEndpoints.csv", "Server endpoints", "server"],
@@ -6101,13 +6468,17 @@ function selfTest(opts) {
       trimPlanFinding ? JSON.stringify([trimPlanFinding.priority, trimPlanFinding.action]) : "finding not found");
     check("effective include resolved (list.jsp sees layout core)", m1.pages.some(function (p) { return p.rel.indexOf("views/sample/list.jsp") >= 0 && p.oldCore && p.effectiveScripts >= 3; }), "");
     check("function-bind not touched (onRow.bind)", !m1.findings.some(function (f) { return f.rel === "js/util.js" && f.category === "bind-to-on" && f.action === "Changed" && f.line >= 16; }), "");
-    ["summary.csv", "apiFindings.csv", "findingCategorySummary.csv", "directoryRiskSummary.csv", "focusQueue.csv", "critical.csv", "xssHigh.csv", "assistant_packet.txt", "voyager_packet.txt", "chat_summary.txt", "index.html", "jquery35_report.xls", "jspPages.csv", "pageScriptEffective.csv", "ajaxEndpoints.csv", "serverEndpoints.csv", "ajaxToServerMap.csv", "uiElementInventory.csv", "selectorElementMap.csv", "runtimeScenarios.csv", "runtime_scenarios.json", "runtime_scenarios.html", "hermes_server_evidence.json", "airgap_manifest.json", "airgap_manifest.txt", "mock_routes.json"].forEach(function (f) {
-      check("report file " + f, exists(path.join(r1, f)), "");
-    });
-    const voyagerPacket = readUtf8(path.join(r1, "voyager_packet.txt"));
-    check("voyager packet is copy-paste compact and includes runtime scenarios",
-      voyagerPacket.indexOf("JQ35_VOYAGER_PACKET") >= 0 && voyagerPacket.indexOf("SUMMARY|") >= 0 && voyagerPacket.indexOf("RT|") >= 0 && voyagerPacket.indexOf("SEL|") >= 0,
-      voyagerPacket.slice(0, 500));
+	    ["summary.csv", "apiFindings.csv", "findingCategorySummary.csv", "directoryRiskSummary.csv", "focusQueue.csv", "critical.csv", "xssHigh.csv", "assistant_packet.txt", "voyager_packet.txt", "chat_summary.txt", "index.html", "jquery35_report.xls", "jspPages.csv", "pageScriptEffective.csv", "ajaxEndpoints.csv", "serverEndpoints.csv", "ajaxToServerMap.csv", "uiElementInventory.csv", "selectorElementMap.csv", "runtimeScenarios.csv", "runtime_scenarios.json", "runtime_scenarios.html", "runtimeParity.csv", "ieModeRisk.csv", "runtime_parity.html", "runtime_lab_guide.md", "hermes_server_evidence.json", "airgap_manifest.json", "airgap_manifest.txt", "mock_routes.json"].forEach(function (f) {
+	      check("report file " + f, exists(path.join(r1, f)), "");
+	    });
+	    const voyagerPacket = readUtf8(path.join(r1, "voyager_packet.txt"));
+	    check("voyager packet is copy-paste compact and includes runtime scenarios",
+	      voyagerPacket.indexOf("JQ35_VOYAGER_PACKET") >= 0 && voyagerPacket.indexOf("SUMMARY|") >= 0 && voyagerPacket.indexOf("RT|") >= 0 && voyagerPacket.indexOf("SEL|") >= 0 && voyagerPacket.indexOf("PARITY|") >= 0,
+	      voyagerPacket.slice(0, 500));
+	    const parityCsv = readUtf8(path.join(r1, "runtimeParity.csv"));
+	    check("runtime parity classifies local vs real runtime vs IE mode",
+	      c1.RuntimeParityRows > 0 && c1.RuntimeParitySpringTomcat > 0 && c1.RuntimeParityIeMode > 0 && parityCsv.indexOf("SPRING_TOMCAT_REQUIRED") >= 0 && parityCsv.indexOf("IE_MODE_REQUIRED") >= 0,
+	      parityCsv.slice(0, 600));
     check("ui element inventory captures buttons/inputs",
       m1.uiElementRows.some(function (e) { return e.id === "lineDel" && e.role === "button" && e.text.indexOf("Delete") >= 0; }) &&
       m1.uiElementRows.some(function (e) { return e.id === "chk" && e.role === "choice"; }),
@@ -6125,7 +6496,8 @@ function selfTest(opts) {
     check("dashboard staged action queue present", indexHtml.indexOf("단계별 조치 큐") >= 0 && indexHtml.indexOf("조치 범위 로드맵</h2>") < 0 && indexHtml.indexOf("단계별 FocusQueue") < 0 && indexHtml.indexOf("1차 최소") >= 0 && indexHtml.indexOf("2차 안정화") >= 0 && indexHtml.indexOf("3차 최대/후속") >= 0, "");
     check("dashboard stage counts split total auto queue", indexHtml.indexOf("<span>전체</span>") >= 0 && indexHtml.indexOf("<span>자동</span>") >= 0 && indexHtml.indexOf("<span>큐</span>") >= 0, "");
     check("dashboard category and directory summaries present", indexHtml.indexOf("유형/경로 분포") >= 0 && indexHtml.indexOf("event-shortcut-load") >= 0 && indexHtml.indexOf("directoryRiskSummary.csv") >= 0, "");
-    check("dashboard links runtime scenarios", indexHtml.indexOf("Edge IE mode 수동 검증 시나리오") >= 0 && indexHtml.indexOf("runtime_scenarios.html") >= 0, "");
+	    check("dashboard links runtime scenarios", indexHtml.indexOf("Edge IE mode 수동 검증 시나리오") >= 0 && indexHtml.indexOf("runtime_scenarios.html") >= 0, "");
+	    check("dashboard links runtime parity analyzer", indexHtml.indexOf("Runtime Parity 분석") >= 0 && indexHtml.indexOf("runtime_parity.html") >= 0 && indexHtml.indexOf("ieModeRisk.csv") >= 0, "");
 
     log("self-test 2/8: autofix");
     const m2 = buildModel(mk({ source: src, target: t1, report: r1 }), "autofix");
@@ -6333,16 +6705,25 @@ function selfTest(opts) {
     const zipPath = writeReleaseZip(mk({ report: relDir }));
     const zipSig = fs.readFileSync(zipPath).slice(0, 4).toString("hex");
     check("release-zip writes valid zip signature", exists(zipPath) && zipSig === "504b0304", zipSig);
-    const relManifest = JSON.parse(readUtf8(path.join(relDir, "airgap_release_manifest.json")));
-    check("release manifest includes rulepack files", relManifest.files.some(function (f) { return f.path === "rules/public-defaults.json"; }), JSON.stringify(relManifest.files.map(function (f) { return f.path; })));
+	    const relManifest = JSON.parse(readUtf8(path.join(relDir, "airgap_release_manifest.json")));
+	    check("release manifest includes rulepack files", relManifest.files.some(function (f) { return f.path === "rules/public-defaults.json"; }), JSON.stringify(relManifest.files.map(function (f) { return f.path; })));
+	    check("release manifest includes optional runtime-lab scaffold only",
+	      relManifest.files.some(function (f) { return f.path === "runtime-lab/docker-compose.tomcat7.yml"; }) &&
+	      relManifest.files.some(function (f) { return f.path === "runtime-lab/inbox/README.txt"; }) &&
+	      !relManifest.files.some(function (f) { return /app\.war$/i.test(f.path); }),
+	      JSON.stringify(relManifest.files.map(function (f) { return f.path; })));
     const uiHtml = dashboardUiHtml();
     check("ui dashboard contains run API and report link surface",
       uiHtml.indexOf("/api/run") >= 0 && uiHtml.indexOf("/api/state") >= 0 && uiHtml.indexOf("기존 산출물") >= 0 && uiHtml.indexOf("Lab Local Mock") >= 0,
       "");
-    const uiFiles = uiReportFileList({ report: r1 });
-    check("ui report API exposes voyager copy packet link",
-      uiFiles.some(function (f) { return f.file === "voyager_packet.txt" && f.label === "Voyager copy packet"; }),
-      JSON.stringify(uiFiles.map(function (f) { return [f.file, f.label]; })));
+	    const uiFiles = uiReportFileList({ report: r1 });
+	    check("ui report API exposes voyager copy packet link",
+	      uiFiles.some(function (f) { return f.file === "voyager_packet.txt" && f.label === "Voyager copy packet"; }),
+	      JSON.stringify(uiFiles.map(function (f) { return [f.file, f.label]; })));
+	    check("ui report API exposes runtime parity links",
+	      uiFiles.some(function (f) { return f.file === "runtime_parity.html"; }) &&
+	      uiFiles.some(function (f) { return f.file === "runtime_lab_guide.md"; }),
+	      JSON.stringify(uiFiles.map(function (f) { return [f.file, f.label]; })));
     check("ui dashboard contains browse, auto setup, and standardized pipeline controls",
       uiHtml.indexOf("/api/browse") >= 0 && uiHtml.indexOf("/api/run-sequence") >= 0 && uiHtml.indexOf("Browse") >= 0 && uiHtml.indexOf("Auto setup") >= 0 && uiHtml.indexOf("Pipeline: S1") >= 0 && uiHtml.indexOf("S1 분석") >= 0 && uiHtml.indexOf("S10 배포 ZIP") >= 0,
       "");

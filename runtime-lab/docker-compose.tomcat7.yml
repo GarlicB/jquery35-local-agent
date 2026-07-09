@@ -1,0 +1,12 @@
+services:
+  tomcat7:
+    image: tomcat:7.0.109-jdk8-openjdk
+    platform: linux/amd64
+    container_name: jq35-runtime-lab-tomcat7
+    ports:
+      - "18089:8080"
+    volumes:
+      - ./inbox/app.war:/usr/local/tomcat/webapps/ROOT.war:ro
+      - ./logs:/usr/local/tomcat/logs
+    environment:
+      - JAVA_OPTS=-Dfile.encoding=UTF-8 -Djava.awt.headless=true

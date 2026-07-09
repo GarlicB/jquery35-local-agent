@@ -1,0 +1,5 @@
+FROM tomcat:7.0.109-jdk8-openjdk
+
+ENV JAVA_OPTS="-Dfile.encoding=UTF-8 -Djava.awt.headless=true"
+
+COPY inbox/app.war /usr/local/tomcat/webapps/ROOT.war

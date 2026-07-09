@@ -9,7 +9,7 @@ jquery35-local-agent v5 - 명령 예시 모음
   접속: http://127.0.0.1:18088/
   Windows: 실행0_웹대시보드.bat
   기능: source 지정만으로 TO-BE/report/profile/server-source/verify-source 자동 세팅, S1~S10 단계 실행, Pipeline, Local Lab 시작/중지, 기존 report HTML 열기
-  주요 보고서: report\index.html, report\voyager_packet.txt, report\runtime_scenarios.html, report\uiElementInventory.csv, report\selectorElementMap.csv
+  주요 보고서: report\index.html, report\voyager_packet.txt, report\runtime_scenarios.html, report\runtime_parity.html, report\runtime_lab_guide.md
 
 1) 분석만 (원본/TO-BE 아무것도 수정 안 함):
   node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode plan
@@ -51,14 +51,18 @@ jquery35-local-agent v5 - 명령 예시 모음
 9-1) 외부 AI 질문보다 로컬 검수팩 의도를 강조하고 싶을 때:
   node run-jquery35-v5.js --source "C:\work\legacy-app" --report "C:\work\jquery35_report_v5" --mode hermes-pack
 
+9-2) Runtime Parity 확인:
+  report\runtime_parity.html 에서 Local Lab으로 충분한 항목, Spring/Tomcat 실 기동 필요 항목, Edge IE mode 최종 확인 항목을 분리해서 봅니다.
+  선택 실험: TO-BE WAR를 runtime-lab\inbox\app.war 로 둔 뒤 runtime-lab\run-runtime-lab.bat 실행
+
 10) 폐쇄망 반입 증빙만 생성:
   node run-jquery35-v5.js --source "C:\work\legacy-app" --report "C:\work\jquery35_report_v5" --mode airgap-manifest
 
 11) 공개 배포용 ZIP 생성 (source 불필요):
   node run-jquery35-v5.js --report ".\release" --mode release-zip
-  -> .\release\jquery35-local-agent-v5.6.4-public.zip
+  -> .\release\jquery35-local-agent-v5.6.5-public.zip
 
-12) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 115개 체크):
+12) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 123개 체크):
   node run-jquery35-v5.js --mode self-test
 
 유용한 옵션:
