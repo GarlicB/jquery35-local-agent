@@ -29,8 +29,9 @@ jquery35-local-agent v5 - 빠른 시작
 - v5.4부터 rules\*.json / project-profile.public.sample.json 으로 다른 현장용 튜닝을 코드 수정 없이 할 수 있습니다.
 - 폐쇄망 반입 증빙: report\airgap_manifest.txt / airgap_manifest.json
 - 공개 배포 ZIP: node run-jquery35-v5.js --report ".\release" --mode release-zip
-- 외부 AI에 전달할 파일: report\assistant_packet.txt (코드 내용 없이 경로/통계만)
-  또는 report\ai_review_pack.txt (애매한 지점만, 문자열은 마스킹, 반복 학습용)
+- 외부 AI/Codex에 전달할 파일: report\voyager_packet.txt
+  (CSV 파일 전달 없이 통째로 복사/붙여넣기. 요약/상위 큐/검증 시나리오/selector/AJAX 매핑 포함)
+  보조 파일: report\assistant_packet.txt (호환용 요약), report\ai_review_pack.txt (애매한 지점만, 문자열은 마스킹, 반복 학습용)
 - 사람이 개발계/로컬 IE mode에서 따라할 검증 지시서: report\runtime_scenarios.html
 - 상세 설명: README_KO.md / 명령 예시: RUN_EXAMPLES_KO.txt
 - 도구 자체 검증: node run-jquery35-v5.js --mode self-test

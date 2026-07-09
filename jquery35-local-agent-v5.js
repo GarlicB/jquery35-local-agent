@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.6.3";
+const TOOL_VERSION = "5.6.4";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -636,7 +636,7 @@ function helpText() {
     "  lab           analyze + start local mock lab http server (--port, default 18080)",
     "  verify-clean  pre-release gate: fail on old jQuery / probe leftovers / criticals",
     "  pr-report     generate pr_description.md, bamboo_checklist.md, recommended_commits.txt",
-    "  packet        analyze + write assistant_packet.txt / chat_summary.txt only",
+    "  packet        analyze + write assistant_packet.txt / voyager_packet.txt / chat_summary.txt only",
     "  review-pack   analyze + write ai_review_pack.txt/json: a bounded, redacted",
     "                questionnaire over the most ambiguous/high-leverage code spots,",
     "                meant to be copy-pasted to an external AI and iterated on",
@@ -4110,7 +4110,7 @@ function writeIndexHtml(model) {
   parts.push("<h2>다음 액션</h2><ol>");
   recommendedActions(model).forEach(function (a) { parts.push("<li>" + htmlEsc(a) + "</li>"); });
   parts.push("</ol></div></details>");
-  parts.push('<div class="small">상세 데이터: apiFindings.csv / findingCategorySummary.csv / directoryRiskSummary.csv / focusQueue.csv / jspPages.csv / pageScriptEffective.csv / ajaxToServerMap.csv / airgap_manifest.txt / jquery35_report.xls</div>');
+  parts.push('<div class="small">복붙 패킷: ' + reportLink("voyager_packet.txt", "voyager_packet.txt") + ' / 상세 데이터: apiFindings.csv / findingCategorySummary.csv / directoryRiskSummary.csv / focusQueue.csv / jspPages.csv / pageScriptEffective.csv / ajaxToServerMap.csv / airgap_manifest.txt / jquery35_report.xls</div>');
   parts.push("</main>");
   parts.push('<div id="focusDetailModal" class="modalBackdrop" onclick="if(event.target===this) closeFocusDetail();"><div class="modalBox"><div class="modalHead"><div id="focusModalTitle" class="modalTitle"></div><button type="button" class="modalClose" onclick="closeFocusDetail()">Close</button></div><div class="modalBody"><div id="focusModalInfo" class="infoGrid"></div><div class="detailGrid"><div class="pane"><h3>AS-IS</h3><div id="focusAsIs"></div></div><div class="pane"><h3>TO-BE</h3><div id="focusToBe"></div></div></div></div></div></div>');
   parts.push("<script>window.__JQ35_FOCUS_DETAILS__=" + scriptJson(modalDetails) + ";\n(function(){function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c];});}function block(sn){if(!sn||!sn.available){return '<div class=\"noteBox\">'+esc(sn&&sn.note?sn.note:'not available')+'</div>';}return sn.rows.map(function(r){return '<div class=\"codeLine '+(r.hit?'hit':'')+'\"><span class=\"ln\">'+esc(r.n)+'</span><span class=\"txt\">'+esc(r.text)+'</span></div>';}).join('');}window.openFocusDetail=function(i){var d=window.__JQ35_FOCUS_DETAILS__[i];if(!d)return;document.getElementById('focusModalTitle').textContent='#'+d.rank+' '+d.rel+':'+d.line;document.getElementById('focusModalInfo').innerHTML='<div>목록</div><div>'+esc(d.sourceKind)+'</div><div>TO-BE 상태</div><div>'+esc(d.toBeStatus)+'</div><div>유형</div><div>'+esc(d.category)+' / '+esc(d.priority)+' / '+esc(d.confidence)+'</div><div>패턴</div><div>'+esc(d.pattern)+'</div><div>왜 문제인가</div><div>'+esc(d.reason)+'</div><div>어떻게 바꾸나</div><div>'+esc(d.change)+'</div><div>확인할 것</div><div>'+esc(d.verify)+'</div>';document.getElementById('focusAsIs').innerHTML=block(d.asIs);document.getElementById('focusToBe').innerHTML=block(d.toBe);document.getElementById('focusDetailModal').style.display='block';};window.closeFocusDetail=function(){document.getElementById('focusDetailModal').style.display='none';};document.addEventListener('keydown',function(e){if(e.key==='Escape')closeFocusDetail();});})();</script>");
@@ -4193,8 +4193,124 @@ function packetLines(model) {
   return L;
 }
 
+function capPacketLines(lines, cap) {
+  if (lines.length > cap) {
+    const kept = lines.slice(0, Math.max(1, cap - 2));
+    kept.push("TRUNCATED|kept=" + kept.length + "|total=" + lines.length + "|hint=rerun with --max-packet-lines");
+    kept.push("END|JQ35_VOYAGER_PACKET");
+    return kept;
+  }
+  return lines;
+}
+
+function packetField(v, n) {
+  return trunc(String(v == null ? "" : v).replace(/[\r\n\t|]+/g, " ").replace(/\s+/g, " ").trim(), n || 180);
+}
+
+function voyagerPacketLines(model) {
+  const c = model.counters;
+  const L = [];
+  L.push("JQ35_VOYAGER_PACKET|v=" + TOOL_VERSION + "|copyPasteOnly=Y|csvRequired=N");
+  L.push("ASK|csvFilesCannotMove=Y|readThisOnly=Y|task=judge jquery351 migration risk, next actions, and manual IE-mode test plan");
+  L.push("SUMMARY|source=" + packetField(c.SourceRoot, 120) +
+    "|web=" + packetField(c.WebContentRoot, 120) +
+    "|mode=" + packetField(c.Mode, 20) +
+    "|api=" + c.ApiFindings +
+    "|critical=" + c.Critical +
+    "|auto=" + (c.AutoFixed + c.AutoInferred) +
+    "|manual=" + c.Manual +
+    "|review=" + c.Review +
+    "|xss=" + c.XssHigh +
+    "|focus=" + c.FocusQueue +
+    "|runtime=" + c.RuntimeScenarios +
+    "|ui=" + c.UiElements +
+    "|selectorRows=" + c.SelectorElementRows);
+  L.push("COUNTS|oldJq=" + c.OldJqueryBelow350 +
+    "|jqLoads=" + c.JqueryLoads +
+    "|multiCorePages=" + c.PageRiskMultipleJqueryCore +
+    "|migrateMissing=" + c.PageRiskMigrateMissing +
+    "|migrateBeforeCore=" + c.PageRiskMigrateBeforeCore +
+    "|ajax=" + c.AjaxEndpoints +
+    "|serverEndpoints=" + c.ServerEndpoints +
+    "|ajaxMapped=" + c.AjaxMappedToServer +
+    "|vendor=" + c.VendorReview);
+  buildScopeRows(model).forEach(function (s) {
+    L.push("STAGE|" + packetField(stageLabel(s.key), 20) +
+      "|total=" + s.count +
+      "|auto=" + s.autoCount +
+      "|queue=" + s.queueCount +
+      "|goal=" + packetField(s.goal, 160) +
+      "|stop=" + packetField(s.stop, 160));
+  });
+  findingCategorySummary(model).slice(0, 15).forEach(function (r) {
+    L.push("CAT|" + packetField(r.category, 50) +
+      "|total=" + r.total +
+      "|crit=" + r.critical +
+      "|xss=" + r.xss +
+      "|manual=" + r.manual +
+      "|review=" + r.review +
+      "|auto=" + r.auto +
+      "|files=" + r.fileCount);
+  });
+  directoryRiskSummary(model).slice(0, 15).forEach(function (r) {
+    L.push("DIR|d=" + r.depth +
+      "|path=" + packetField(r.prefix, 90) +
+      "|total=" + r.total +
+      "|blockers=" + r.blockers +
+      "|top=" + packetField(r.topCategories, 140));
+  });
+  model.oldCoreRefs.slice(0, 30).forEach(function (r) {
+    L.push("OLDJQ|" + packetField(shortReviewPath(r.page) + ":" + r.line, 90) +
+      "|v=" + packetField(r.meta.ver || "?", 20) +
+      "|src=" + packetField(r.raw, 120));
+  });
+  model.focus.slice(0, 40).forEach(function (f, i) {
+    L.push("FOCUS|" + (i + 1) +
+      "|" + packetField(shortReviewPath(f.rel) + ":" + f.line, 100) +
+      "|cat=" + packetField(f.category, 45) +
+      "|pri=" + packetField(f.priority, 20) +
+      "|why=" + packetField(f.reason, 180) +
+      "|fix=" + packetField(f.suggestion || f.after || "", 160));
+  });
+  model.runtimeScenarios.slice(0, 80).forEach(function (s) {
+    L.push("RT|" + s.id +
+      "|stage=" + packetField(stageLabel(s.stage), 20) +
+      "|page=" + packetField(shortReviewPath(s.page || s.findingRel), 100) +
+      "|find=" + packetField(shortReviewPath(s.findingRel) + ":" + s.line, 100) +
+      "|cat=" + packetField(s.category, 45) +
+      "|pri=" + packetField(s.priority, 20) +
+      "|target=" + packetField(s.uiTarget || s.selector || "-", 140) +
+      "|do=" + packetField(s.action, 220) +
+      "|pass=" + packetField(s.passWhen, 180));
+  });
+  model.selectorElementRows.filter(function (r) { return r.element; }).slice(0, 60).forEach(function (r) {
+    L.push("SEL|" + packetField(shortReviewPath(r.rel) + ":" + r.line, 100) +
+      "|selector=" + packetField(r.selector, 80) +
+      "|page=" + packetField(shortReviewPath(r.page), 100) +
+      "|element=" + packetField(r.element, 120) +
+      "|conf=" + packetField(r.confidence, 20));
+  });
+  model.ajaxServerRows.slice(0, 50).forEach(function (r) {
+    L.push("AJAX|" + packetField(shortReviewPath(r.rel) + ":" + r.line, 100) +
+      "|" + packetField(r.ajaxMethod + " " + r.ajaxUrl, 130) +
+      "|matched=" + r.matched +
+      "|handler=" + packetField(r.handler || "-", 130) +
+      "|conf=" + packetField(r.confidence, 20) +
+      "|note=" + packetField(r.note, 100));
+  });
+  const libs = {};
+  model.scriptInv.forEach(function (r) { libs[r[1]] = (libs[r[1]] || 0) + 1; });
+  L.push("LIBS|" + Object.keys(libs).sort().map(function (k) { return packetField(k, 40) + "=" + libs[k]; }).join(","));
+  recommendedActions(model).forEach(function (a, i) {
+    L.push("NEXT|" + (i + 1) + "|" + packetField(a, 220));
+  });
+  L.push("END|JQ35_VOYAGER_PACKET");
+  return capPacketLines(L, positiveIntOpt(model.opts["max-packet-lines"], 400));
+}
+
 function writePacket(model) {
   writeUtf8(path.join(model.reportRoot, "assistant_packet.txt"), packetLines(model).join("\r\n") + "\r\n", true);
+  writeUtf8(path.join(model.reportRoot, "voyager_packet.txt"), voyagerPacketLines(model).join("\r\n") + "\r\n", true);
 }
 
 function writeChatSummary(model) {
@@ -4983,7 +5099,7 @@ function writeAllReports(model, extra) {
   log("report written: " + model.reportRoot);
   log("  - index.html (dashboard), summary.csv, apiFindings.csv, findingCategorySummary.csv, directoryRiskSummary.csv, focusQueue.csv, jquery35_report.xls");
   log("  - runtime_scenarios.html / runtimeScenarios.csv / uiElementInventory.csv / selectorElementMap.csv");
-  log("  - assistant_packet.txt / chat_summary.txt / airgap_manifest.txt");
+  log("  - voyager_packet.txt / assistant_packet.txt / chat_summary.txt / airgap_manifest.txt");
 }
 const MIME = {
   ".html": "text/html", ".htm": "text/html", ".js": "application/javascript",
@@ -5491,6 +5607,8 @@ function uiReportFileList(state) {
   const files = [
     ["index.html", "Main report", "report"],
     ["jquery35_report.xls", "Excel report", "report"],
+    ["voyager_packet.txt", "Voyager copy packet", "report"],
+    ["assistant_packet.txt", "Assistant packet", "report"],
     ["focusQueue.csv", "Focus queue", "queue"],
     ["autoFixed.csv", "Auto fixes", "queue"],
     ["manualQueue.csv", "Manual queue", "queue"],
@@ -5983,9 +6101,13 @@ function selfTest(opts) {
       trimPlanFinding ? JSON.stringify([trimPlanFinding.priority, trimPlanFinding.action]) : "finding not found");
     check("effective include resolved (list.jsp sees layout core)", m1.pages.some(function (p) { return p.rel.indexOf("views/sample/list.jsp") >= 0 && p.oldCore && p.effectiveScripts >= 3; }), "");
     check("function-bind not touched (onRow.bind)", !m1.findings.some(function (f) { return f.rel === "js/util.js" && f.category === "bind-to-on" && f.action === "Changed" && f.line >= 16; }), "");
-    ["summary.csv", "apiFindings.csv", "findingCategorySummary.csv", "directoryRiskSummary.csv", "focusQueue.csv", "critical.csv", "xssHigh.csv", "assistant_packet.txt", "chat_summary.txt", "index.html", "jquery35_report.xls", "jspPages.csv", "pageScriptEffective.csv", "ajaxEndpoints.csv", "serverEndpoints.csv", "ajaxToServerMap.csv", "uiElementInventory.csv", "selectorElementMap.csv", "runtimeScenarios.csv", "runtime_scenarios.json", "runtime_scenarios.html", "hermes_server_evidence.json", "airgap_manifest.json", "airgap_manifest.txt", "mock_routes.json"].forEach(function (f) {
+    ["summary.csv", "apiFindings.csv", "findingCategorySummary.csv", "directoryRiskSummary.csv", "focusQueue.csv", "critical.csv", "xssHigh.csv", "assistant_packet.txt", "voyager_packet.txt", "chat_summary.txt", "index.html", "jquery35_report.xls", "jspPages.csv", "pageScriptEffective.csv", "ajaxEndpoints.csv", "serverEndpoints.csv", "ajaxToServerMap.csv", "uiElementInventory.csv", "selectorElementMap.csv", "runtimeScenarios.csv", "runtime_scenarios.json", "runtime_scenarios.html", "hermes_server_evidence.json", "airgap_manifest.json", "airgap_manifest.txt", "mock_routes.json"].forEach(function (f) {
       check("report file " + f, exists(path.join(r1, f)), "");
     });
+    const voyagerPacket = readUtf8(path.join(r1, "voyager_packet.txt"));
+    check("voyager packet is copy-paste compact and includes runtime scenarios",
+      voyagerPacket.indexOf("JQ35_VOYAGER_PACKET") >= 0 && voyagerPacket.indexOf("SUMMARY|") >= 0 && voyagerPacket.indexOf("RT|") >= 0 && voyagerPacket.indexOf("SEL|") >= 0,
+      voyagerPacket.slice(0, 500));
     check("ui element inventory captures buttons/inputs",
       m1.uiElementRows.some(function (e) { return e.id === "lineDel" && e.role === "button" && e.text.indexOf("Delete") >= 0; }) &&
       m1.uiElementRows.some(function (e) { return e.id === "chk" && e.role === "choice"; }),
@@ -6217,6 +6339,10 @@ function selfTest(opts) {
     check("ui dashboard contains run API and report link surface",
       uiHtml.indexOf("/api/run") >= 0 && uiHtml.indexOf("/api/state") >= 0 && uiHtml.indexOf("기존 산출물") >= 0 && uiHtml.indexOf("Lab Local Mock") >= 0,
       "");
+    const uiFiles = uiReportFileList({ report: r1 });
+    check("ui report API exposes voyager copy packet link",
+      uiFiles.some(function (f) { return f.file === "voyager_packet.txt" && f.label === "Voyager copy packet"; }),
+      JSON.stringify(uiFiles.map(function (f) { return [f.file, f.label]; })));
     check("ui dashboard contains browse, auto setup, and standardized pipeline controls",
       uiHtml.indexOf("/api/browse") >= 0 && uiHtml.indexOf("/api/run-sequence") >= 0 && uiHtml.indexOf("Browse") >= 0 && uiHtml.indexOf("Auto setup") >= 0 && uiHtml.indexOf("Pipeline: S1") >= 0 && uiHtml.indexOf("S1 분석") >= 0 && uiHtml.indexOf("S10 배포 ZIP") >= 0,
       "");
@@ -6305,7 +6431,7 @@ function run(argv) {
       writeCsv(path.join(model.reportRoot, "summary.csv"), ["Key", "Value"], Object.keys(model.counters).map(function (k) { return [k, model.counters[k]]; }));
       writePacket(model);
       writeChatSummary(model);
-      log("packet written: " + path.join(model.reportRoot, "assistant_packet.txt"));
+      log("packet written: " + path.join(model.reportRoot, "assistant_packet.txt") + " / " + path.join(model.reportRoot, "voyager_packet.txt"));
     } else if (mode === "review-pack" || mode === "hermes-pack") {
       writeAllReports(model, {});
       writeReviewPack(model);
