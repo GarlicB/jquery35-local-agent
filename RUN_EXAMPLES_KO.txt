@@ -18,7 +18,7 @@ jquery35-local-agent v5 - 명령 예시 모음
 2) TO-BE 자동수정 (안전 항목만):
   node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode autofix
 
-3) jQuery 호출부 교체 (사전에 WebContent\js 에 jquery-3.5.1.min.js, jquery-migrate-3.6.0.min.js 배치):
+3) jQuery 호출부 교체 (기본 3.5.1/Migrate 파일은 도구가 TO-BE WebContent\js 에 자동 배치):
   node run-jquery35-v5.js --source "C:\work\legacy-app" --target "C:\work\legacy-app_jquery35_tobe" --report "C:\work\jquery35_report_v5" --mode patch-jquery
 
 4) Runtime Probe 삽입:
@@ -66,9 +66,9 @@ jquery35-local-agent v5 - 명령 예시 모음
 
 11) 공개 배포용 ZIP 생성 (source 불필요):
   node run-jquery35-v5.js --report ".\release" --mode release-zip
-  -> .\release\jquery35-local-agent-v5.6.5-public.zip
+  -> .\release\jquery35-local-agent-v5.6.6-public.zip
 
-12) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 123개 체크):
+12) 도구 자체 검증 (회사 코드 불필요, 임시폴더에 샘플 생성 후 126개 체크):
   node run-jquery35-v5.js --mode self-test
 
 유용한 옵션:

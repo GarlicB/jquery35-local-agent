@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.6.5";
+const TOOL_VERSION = "5.6.6";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -3448,6 +3448,25 @@ function targetPathOf(model, ctx) {
   return path.join(model.targetRoot, ctx.projRel.split("/").join(path.sep));
 }
 
+function bundledJqueryAssetPath(fileName) {
+  const base = path.basename(String(fileName || ""));
+  if (!base || base !== String(fileName || "")) return "";
+  const abs = path.join(__dirname, "assets", "jquery", base);
+  return exists(abs) ? abs : "";
+}
+
+function installBundledJqueryAsset(model, fileName, destAbs, label) {
+  if (!destAbs || exists(destAbs)) return false;
+  if (!model.targetWcRoot || !isUnderDir(destAbs, model.targetWcRoot)) return false;
+  const asset = bundledJqueryAssetPath(fileName);
+  if (!asset) return false;
+  ensureDir(path.dirname(destAbs));
+  fs.copyFileSync(asset, destAbs);
+  const rel = normalizeWcPath(path.relative(model.targetWcRoot, destAbs));
+  model.patchResults.push([rel, fileName, "BUNDLED", "copied bundled " + label + " asset into TO-BE"]);
+  return true;
+}
+
 function findScriptSrcSpan(text, refRow) {
   if (refRow.srcStart !== undefined && refRow.srcEnd !== undefined && text.slice(refRow.srcStart, refRow.srcEnd) === refRow.raw) {
     return { start: refRow.srcStart, end: refRow.srcEnd, tagStart: refRow.tagStart !== undefined ? refRow.tagStart : refRow.idx };
@@ -3532,14 +3551,16 @@ function patchJqueryCore(model) {
       if (!jq.newJquerySrc) {
         const chk = resolveRef(newSrc, rel, model);
         const tAbs = chk.resolved ? path.join(model.targetWcRoot, chk.resolved.split("/").join(path.sep)) : "";
+        if (tAbs && !exists(tAbs)) installBundledJqueryAsset(model, jq.coreFile, tAbs, "jQuery core");
         if (!tAbs || !exists(tAbs)) {
-          model.patchResults.push([rel, r.raw, "SKIP", "new core file not found in target: " + (chk.resolved || newSrc) + " (put " + jq.coreFile + " under WebContent/js first)"]);
+          model.patchResults.push([rel, r.raw, "SKIP", "new core file not found in target or bundled assets: " + (chk.resolved || newSrc) + " (put " + jq.coreFile + " under WebContent/js or assets/jquery first)"]);
           return;
         }
         const chk2 = resolveRef(migSrc, rel, model);
         const tAbs2 = chk2.resolved ? path.join(model.targetWcRoot, chk2.resolved.split("/").join(path.sep)) : "";
+        if (tAbs2 && !exists(tAbs2)) installBundledJqueryAsset(model, jq.migrateFile, tAbs2, "jQuery Migrate");
         if (!tAbs2 || !exists(tAbs2)) {
-          model.patchResults.push([rel, r.raw, "SKIP", "migrate file not found in target: " + (chk2.resolved || migSrc)]);
+          model.patchResults.push([rel, r.raw, "SKIP", "migrate file not found in target or bundled assets: " + (chk2.resolved || migSrc)]);
           return;
         }
       }
@@ -5255,6 +5276,12 @@ function releaseCandidateFiles() {
 	    "runtime-lab/run-spring325-tomcat7-local.sh",
 	    "runtime-lab/inbox/README.txt"
 	  ];
+  const assetDir = path.join(root, "assets", "jquery");
+  if (isDir(assetDir)) {
+    fs.readdirSync(assetDir).sort().forEach(function (name) {
+      if (/\.(js|txt)$/i.test(name)) files.push("assets/jquery/" + name);
+    });
+  }
   const rulesDir = path.join(root, "rules");
   if (isDir(rulesDir)) {
     fs.readdirSync(rulesDir).sort().forEach(function (name) {
@@ -6572,14 +6599,17 @@ function selfTest(opts) {
     check("verify-clean FAIL (old jquery + probe)", v1.code === 2 && v1.failCount >= 2, "code=" + v1.code + " fail=" + v1.failCount);
 
     log("self-test 5/8: patch-jquery");
-    writeLatin1(path.join(wc, "js", "jquery-3.5.1.min.js"), "/*! jQuery v3.5.1 fixture */");
-    writeLatin1(path.join(wc, "js", "jquery-migrate-3.6.0.min.js"), "/*! jQuery Migrate v3.6.0 fixture */");
     const t3 = path.join(base, "tobe_patch");
     const m5 = buildModel(mk({ source: src, target: t3, report: r1, "migrate-trace": true }), "patch-jquery");
     analyze(m5);
     writeTarget(m5, { patch: true });
     writeAllReports(m5, {});
     const layoutPatched = readLatin1(path.join(t3, "WebContent", "WEB-INF", "layouts", "common_script_lib.jsp"));
+    check("bundled jQuery files copied to TO-BE",
+      exists(path.join(t3, "WebContent", "js", "jquery-3.5.1.min.js")) &&
+      exists(path.join(t3, "WebContent", "js", "jquery-migrate-3.6.0.min.js")) &&
+      m5.patchResults.filter(function (r) { return r[2] === "BUNDLED"; }).length >= 2,
+      JSON.stringify(m5.patchResults));
     check("core swapped to 3.5.1", layoutPatched.indexOf("jquery-3.5.1.min.js") >= 0 && layoutPatched.indexOf("jquery-1.10.2.min.js") < 0, trunc(layoutPatched, 200));
     check("migrate inserted after core", layoutPatched.indexOf("jquery-migrate-3.6.0.min.js") >= 0, "");
     check("migrate after core order", layoutPatched.indexOf("jquery-3.5.1.min.js") < layoutPatched.indexOf("jquery-migrate-3.6.0.min.js"), "");
@@ -6723,6 +6753,11 @@ function selfTest(opts) {
 	      relManifest.files.some(function (f) { return f.path === "runtime-lab/docker-compose.tomcat7.yml"; }) &&
 	      relManifest.files.some(function (f) { return f.path === "runtime-lab/inbox/README.txt"; }) &&
 	      !relManifest.files.some(function (f) { return /app\.war$/i.test(f.path); }),
+	      JSON.stringify(relManifest.files.map(function (f) { return f.path; })));
+	    check("release manifest includes bundled jQuery automation assets",
+	      relManifest.files.some(function (f) { return f.path === "assets/jquery/jquery-3.5.1.min.js"; }) &&
+	      relManifest.files.some(function (f) { return f.path === "assets/jquery/jquery-migrate-3.6.0.min.js"; }) &&
+	      relManifest.files.some(function (f) { return f.path === "assets/jquery/README.txt"; }),
 	      JSON.stringify(relManifest.files.map(function (f) { return f.path; })));
     const uiHtml = dashboardUiHtml();
     check("ui dashboard contains run API and report link surface",
