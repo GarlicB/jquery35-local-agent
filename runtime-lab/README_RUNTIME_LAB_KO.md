@@ -45,6 +45,13 @@ cd runtime-lab
 ./run-spring325-tomcat7-local.sh start
 ```
 
+Codex/macOS처럼 명령 종료 뒤에도 계속 띄워 두려면:
+
+```sh
+cd runtime-lab
+./run-spring325-tomcat7-local.sh screen-start
+```
+
 확인 URL:
 
 ```text

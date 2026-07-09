@@ -5907,7 +5907,7 @@ function uiAddArg(args, name, val) {
   if (val !== undefined && val !== null && String(val) !== "") args.push("--" + name, String(val));
 }
 
-function uiBuildArgs(mode, state, forLab) {
+function uiBuildArgs(mode, state, forLab, useVerifySource) {
   if (!UI_RUN_MODES[mode] && mode !== "lab") throw new Error("unsupported ui mode: " + mode);
   const args = ["--mode", mode];
   const report = state.report || "";
@@ -5917,11 +5917,12 @@ function uiBuildArgs(mode, state, forLab) {
     return args;
   }
   let source = state.source || "";
-  if (mode === "verify-clean") source = state.verifySource || state.target || state.source || "";
+  const sourceIsVerify = mode === "verify-clean" || useVerifySource === true;
+  if (sourceIsVerify) source = state.verifySource || state.target || state.source || "";
   if (!source) throw new Error("source is required");
   if (!report) throw new Error("report folder is required");
   uiAddArg(args, "source", source);
-  if (mode !== "verify-clean" && state.target) uiAddArg(args, "target", state.target);
+  if (!sourceIsVerify && state.target) uiAddArg(args, "target", state.target);
   if ((mode === "autofix" || mode === "patch-jquery" || mode === "probe") && !state.target) {
     throw new Error("--target is required for mode " + mode);
   }
@@ -5940,7 +5941,15 @@ function uiBuildArgs(mode, state, forLab) {
   return args;
 }
 
-const UI_SEQUENCE_MODES = ["plan", "autofix", "patch-jquery", "hermes-pack", "pr-report", "airgap-manifest"];
+const UI_SEQUENCE_STEPS = [
+  { mode: "plan", verify: false },
+  { mode: "autofix", verify: false },
+  { mode: "patch-jquery", verify: false },
+  { mode: "hermes-pack", verify: true },
+  { mode: "verify-clean", verify: true },
+  { mode: "pr-report", verify: true },
+  { mode: "airgap-manifest", verify: true }
+];
 
 function uiRunnerScript() {
   return path.join(__dirname, "run-jquery35-v5.js");
@@ -6061,7 +6070,7 @@ function dashboardUiHtml() {
     "var state=null,job=null,lab=null,uiBusy=0;var ops=[['plan','S1 분석','index/report 생성'],['autofix','S2 TO-BE 자동수정','안전 변경을 target에 생성'],['patch-jquery','S3 jQuery 교체','3.5.1 + Migrate 적용'],['probe','S4 Probe 삽입','검증용 target 런타임 probe'],['review-pack','S5 AI 리뷰팩','마스킹 질문지 + 검수팩'],['hermes-pack','S6 Hermes 검수팩','로컬 시험장 + 검수 기준'],['verify-clean','S7 운영 전 검증','target 또는 verify source 게이트'],['pr-report','S8 PR/CI 보고서','커밋/뱀부 체크리스트'],['airgap-manifest','S9 폐쇄망 증빙','무통신/무의존 manifest'],['release-zip','S10 배포 ZIP','공개 배포용 작은 zip']];" +
     "function byId(id){return document.getElementById(id)}function esc(s){return String(s==null?'':s).replace(/[&<>\\\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[c]})}function api(p,o){return fetch(p,Object.assign({headers:{'Content-Type':'application/json'}},o||{})).then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error(j.error||r.statusText);return j})})}" +
     "function fill(){if(!state)return;['source','target','report','profile','rulepack','serverSource','verifySource','labPort','maxReviewCases','contextLines','maxReviewLines'].forEach(function(k){byId('cfg_'+k).value=state[k]||''});byId('cfg_migrateTrace').checked=!!state.migrateTrace;byId('cfg_noServerScan').checked=!!state.noServerScan;byId('pathLine').textContent='source: '+(state.source||'-')+' / target: '+(state.target||'-')+' / report: '+(state.report||'-')}" +
-    "function renderOps(){var h='<div class=\"op\"><b>Pipeline: S1→S2→S3→S6→S8→S9→Lab</b><span>기본 안착 산출물을 순차 생성. S4/S5/S7/S10은 필요 시 개별 실행</span><button class=\"primary\" onclick=\"runPipeline()\" '+(job&&job.running?'disabled':'')+'>Run Pipeline</button></div>';ops.forEach(function(o){h+='<div class=\"op\"><b>'+esc(o[1])+'</b><span>'+esc(o[2])+'</span><button onclick=\"runMode(\\''+o[0]+'\\')\" '+(job&&job.running?'disabled':'')+'>Run '+esc(o[1].split(' ')[0])+'</button></div>'});h+='<div class=\"op\"><b>Lab Local Mock</b><span>mock 서버 시작. Pipeline 마지막에도 실행</span><button onclick=\"startLab()\" '+(lab&&lab.running?'disabled':'')+'>Start Lab</button></div>';byId('ops').innerHTML=h}" +
+    "function renderOps(){var h='<div class=\"op\"><b>Pipeline: S1→S2→S3→S6→S7→S8→S9→Lab</b><span>S3까지 TO-BE를 만들고, S6 이후 검수/보고서/Lab은 verify source 기준으로 실행</span><button class=\"primary\" onclick=\"runPipeline()\" '+(job&&job.running?'disabled':'')+'>Run Pipeline</button></div>';ops.forEach(function(o){h+='<div class=\"op\"><b>'+esc(o[1])+'</b><span>'+esc(o[2])+'</span><button onclick=\"runMode(\\''+o[0]+'\\')\" '+(job&&job.running?'disabled':'')+'>Run '+esc(o[1].split(' ')[0])+'</button></div>'});h+='<div class=\"op\"><b>Lab Local Mock</b><span>mock 서버 시작. Pipeline 마지막에도 verify source로 실행</span><button onclick=\"startLab()\" '+(lab&&lab.running?'disabled':'')+'>Start Lab</button></div>';byId('ops').innerHTML=h}" +
     "function renderLinks(files){var h='';(files||[]).forEach(function(f){h+='<a class=\"link\" target=\"_blank\" href=\"'+esc(f.href)+'\"><b>'+esc(f.label)+'</b><span>'+esc(f.file)+' · '+Math.ceil((f.size||0)/1024)+'KB</span></a>'});byId('links').innerHTML=h||'<div class=\"muted\">생성된 report 파일이 없습니다.</div>'}" +
     "function renderStatus(){var jp=byId('jobPill');if(job&&job.running){jp.textContent='running '+job.mode;jp.className='pill warn'}else if(job){jp.textContent='last '+job.mode+' exit '+job.exitCode;jp.className='pill '+(job.exitCode===0?'ok':'bad')}else{jp.textContent='idle';jp.className='pill'}var lp=byId('labPill');if(lab&&lab.running){lp.innerHTML='<a target=\"_blank\" href=\"http://localhost:'+esc(state.labPort||'18080')+'/_pages\">lab '+esc(state.labPort||'18080')+'</a>';lp.className='pill ok'}else{lp.textContent='lab off';lp.className='pill'}byId('log').textContent=job?job.log:'';renderOps()}" +
     "function collect(){var o={};['source','target','report','profile','rulepack','serverSource','verifySource','labPort','maxReviewCases','contextLines','maxReviewLines'].forEach(function(k){o[k]=byId('cfg_'+k).value});o.migrateTrace=byId('cfg_migrateTrace').checked;o.noServerScan=byId('cfg_noServerScan').checked;return o}" +
@@ -6101,12 +6110,12 @@ function startDashboardUi(opts) {
   function runSequence() {
     const target = { id: ++jobSeq, mode: "pipeline", running: true, startedAt: new Date().toISOString(), finishedAt: "", exitCode: null, error: "", log: [] };
     currentJob = target;
-    const modes = UI_SEQUENCE_MODES.slice();
+    const steps = UI_SEQUENCE_STEPS.slice();
     const runStep = function (i) {
-      if (i >= modes.length) {
-        uiAppendLog(target, "\n[pipeline] starting Local Lab\n");
+      if (i >= steps.length) {
+        uiAppendLog(target, "\n[pipeline] starting Local Lab from verify source\n");
         try {
-          if (!(labJob && labJob.running)) startChild("lab", uiBuildArgs("lab", state, true), true);
+          if (!(labJob && labJob.running)) startChild("lab", uiBuildArgs("lab", state, true, true), true);
         } catch (e) {
           uiAppendLog(target, "[pipeline] lab skipped: " + e.message + "\n");
         }
@@ -6116,10 +6125,11 @@ function startDashboardUi(opts) {
         uiAppendLog(target, "[pipeline] complete\n");
         return;
       }
-      const mode = modes[i];
+      const step = steps[i];
+      const mode = step.mode;
       let args;
       try {
-        args = uiBuildArgs(mode, state, false);
+        args = uiBuildArgs(mode, state, false, step.verify === true);
       } catch (e) {
         target.running = false;
         target.exitCode = 2;
@@ -6128,7 +6138,7 @@ function startDashboardUi(opts) {
         uiAppendLog(target, "[pipeline] " + mode + " skipped: " + e.message + "\n");
         return;
       }
-      uiAppendLog(target, "\n[pipeline] " + (i + 1) + "/" + modes.length + " " + mode + "\n");
+      uiAppendLog(target, "\n[pipeline] " + (i + 1) + "/" + steps.length + " " + mode + (step.verify ? " (verify source)" : " (source)") + "\n");
       uiAppendLog(target, "$ node run-jquery35-v5.js " + args.map(function (a) { return /\s/.test(a) ? '"' + a + '"' : a; }).join(" ") + "\n");
       const child = cp.spawn(process.execPath, [uiRunnerScript()].concat(args), { cwd: __dirname, stdio: ["ignore", "pipe", "pipe"] });
       target.child = child;
@@ -6211,7 +6221,7 @@ function startDashboardUi(opts) {
       if (req.method === "POST" && u.pathname === "/api/lab/start") {
         if (labJob && labJob.running) { uiSendJson(res, 409, { ok: false, error: "lab already running" }); return; }
         try {
-          const args = uiBuildArgs("lab", state, true);
+          const args = uiBuildArgs("lab", state, true, true);
           const j = startChild("lab", args, true);
           uiSendJson(res, 200, { ok: true, lab: uiJobView(j) });
         } catch (e) {
@@ -6733,6 +6743,10 @@ function selfTest(opts) {
     check("ui autofix command includes target/report/source",
       uiArgs.indexOf("--source") >= 0 && uiArgs.indexOf("--target") >= 0 && uiArgs.indexOf("--report") >= 0,
       uiArgs.join(" "));
+    const uiPipelineReportArgs = uiBuildArgs("pr-report", normalizedUiState({ source: src, target: t3, verifySource: t3, report: r1 }, defaultUiState(mk({}))), false, true);
+    check("ui pipeline post-patch modes use verify source without excluding target",
+      uiPipelineReportArgs[uiPipelineReportArgs.indexOf("--source") + 1] === t3 && uiPipelineReportArgs.indexOf("--target") < 0,
+      uiPipelineReportArgs.join(" "));
     const derived = uiDerivedPaths(src, true);
     check("ui derived paths create project sibling target/report/profile defaults",
       derived.target.indexOf(path.basename(src) + "_jquery35_tobe") >= 0 &&
@@ -6797,9 +6811,7 @@ function run(argv) {
       });
       writeAllReports(model, {});
     } else if (mode === "lab") {
-      if (!model.opts["no-lab"]) writeMockFiles(model);
-      writeIndexHtml(model);
-      writePacket(model);
+      writeAllReports(model, {});
       startLab(model, opts);
       return;
     } else if (mode === "verify-clean") {

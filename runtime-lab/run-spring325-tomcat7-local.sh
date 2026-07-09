@@ -74,15 +74,233 @@ build_demo_war() {
   download_jar commons-logging commons-logging 1.1.3 "$WAR_DIR/WEB-INF/lib"
   download_jar aopalliance aopalliance 1.0 "$WAR_DIR/WEB-INF/lib"
 
+  cat > "$WAR_DIR/lab.css" <<'EOF'
+:root {
+  color-scheme: light;
+  --bg: #f5f7fb;
+  --panel: #ffffff;
+  --ink: #172033;
+  --muted: #657386;
+  --line: #d9e0eb;
+  --accent: #146c94;
+  --ok: #0f7a5f;
+  --warn-bg: #fff8e8;
+  --warn-line: #d49b2f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+}
+
+.shell {
+  width: min(960px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 44px 0;
+}
+
+.hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 24px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  font-size: 34px;
+  line-height: 1.16;
+  letter-spacing: 0;
+}
+
+h2 {
+  margin: 0 0 16px;
+  font-size: 19px;
+  letter-spacing: 0;
+}
+
+.lede {
+  max-width: 720px;
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid rgba(15, 122, 95, 0.24);
+  border-radius: 999px;
+  background: rgba(15, 122, 95, 0.1);
+  color: var(--ok);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.panel {
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 12px 34px rgba(31, 44, 65, 0.08);
+}
+
+.panel + .panel {
+  margin-top: 16px;
+}
+
+.fact-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.fact {
+  min-width: 0;
+  padding-top: 10px;
+  border-top: 2px solid #e6ebf3;
+}
+
+.fact span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.fact strong {
+  display: block;
+  margin-top: 5px;
+  font-size: 16px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.button.secondary {
+  background: #fff;
+  color: var(--accent);
+}
+
+.check-list {
+  display: grid;
+  gap: 9px;
+  margin: 16px 0 0;
+  padding-left: 20px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.note {
+  margin: 18px 0 0;
+  padding: 13px 14px;
+  border-left: 4px solid var(--warn-line);
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: #5c471e;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+@media (max-width: 640px) {
+  .shell {
+    width: calc(100% - 24px);
+    padding: 28px 0;
+  }
+
+  .hero {
+    display: block;
+  }
+
+  .status {
+    margin-top: 16px;
+  }
+
+  h1 {
+    font-size: 28px;
+  }
+
+  .fact-grid {
+    grid-template-columns: 1fr;
+  }
+}
+EOF
+
   cat > "$WAR_DIR/index.html" <<'EOF'
 <!doctype html>
 <html>
-<head><meta charset="UTF-8"><title>Spring 3.2.5 Tomcat 7 Lab</title></head>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spring 3.2.5 Tomcat 7 Lab</title>
+  <link rel="stylesheet" href="lab.css">
+</head>
 <body>
-  <h1>Spring 3.2.5 + Tomcat 7 Local Lab</h1>
-  <ul>
-    <li><a href="health.do">Spring MVC health.do</a></li>
-  </ul>
+  <main class="shell">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">Runtime parity smoke</p>
+        <h1>Spring 3.2.5 + Tomcat 7 Local Lab</h1>
+        <p class="lede">Project-local WAR is deployed on Tomcat 7. Use this page to prove that the servlet container and Spring MVC route are alive before testing real TO-BE pages.</p>
+      </div>
+      <span class="status">READY</span>
+    </section>
+
+    <section class="panel">
+      <h2>Checks</h2>
+      <div class="action-row">
+        <a class="button" href="health.do">Open Spring MVC health</a>
+      </div>
+      <ul class="check-list">
+        <li>Tomcat and Spring jars are loaded from runtime-lab/.work.</li>
+        <li>No JSP compiler is required for this smoke check.</li>
+        <li>Business WAR/JSP compatibility still needs the target JDK/WAS run.</li>
+      </ul>
+    </section>
+  </main>
 </body>
 </html>
 EOF
@@ -102,16 +320,34 @@ public class HealthController implements Controller {
     response.setContentType("text/html; charset=UTF-8");
     PrintWriter out = response.getWriter();
     out.println("<!doctype html>");
-    out.println("<html><head><meta charset=\"UTF-8\"><title>Spring 3.2.5 Health</title></head><body>");
-    out.println("<h1>Spring MVC is running</h1>");
-    out.println("<dl>");
-    out.println("<dt>Spring</dt><dd>3.2.5.RELEASE</dd>");
-    out.println("<dt>Servlet container</dt><dd>" + request.getServletContext().getServerInfo() + "</dd>");
-    out.println("<dt>Java</dt><dd>" + System.getProperty("java.version") + "</dd>");
-    out.println("<dt>Request URI</dt><dd>" + request.getRequestURI() + "</dd>");
-    out.println("</dl>");
+    out.println("<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Spring 3.2.5 Health</title><link rel=\"stylesheet\" href=\"/lab.css\"></head><body>");
+    out.println("<main class=\"shell\">");
+    out.println("<section class=\"hero\"><div><p class=\"eyebrow\">Runtime parity smoke</p><h1>Spring MVC is running</h1><p class=\"lede\">This response is produced by a Spring MVC Controller inside the Tomcat 7 WAR.</p></div><span class=\"status\">RUNNING</span></section>");
+    out.println("<section class=\"panel\"><h2>Runtime facts</h2><div class=\"fact-grid\">");
+    writeFact(out, "Spring", "3.2.5.RELEASE");
+    writeFact(out, "Servlet container", request.getServletContext().getServerInfo());
+    writeFact(out, "Java", System.getProperty("java.version"));
+    writeFact(out, "Request URI", request.getRequestURI());
+    out.println("</div><p class=\"note\">JSP compilation is intentionally bypassed in this smoke because Tomcat 7's old JSP compiler can fail under newer JDK class formats. Test business JSPs on the company JDK/WAS path.</p></section>");
+    out.println("<section class=\"panel\"><h2>Navigation</h2><div class=\"action-row\"><a class=\"button\" href=\"/\">Open lab index</a><a class=\"button secondary\" href=\"/health.do\">Reload health</a></div></section>");
+    out.println("</main>");
     out.println("</body></html>");
     return null;
+  }
+
+  private void writeFact(PrintWriter out, String label, String value) {
+    out.println("<div class=\"fact\"><span>" + escape(label) + "</span><strong>" + escape(value) + "</strong></div>");
+  }
+
+  private String escape(String value) {
+    if (value == null) {
+      return "";
+    }
+    return value
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", "&quot;");
   }
 }
 EOF
@@ -212,16 +448,28 @@ EOF
 }
 
 stop_tomcat() {
+  pids=""
   if [ -f "$PID_FILE" ]; then
-    old_pid=$(cat "$PID_FILE" 2>/dev/null || true)
-    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-      log "stop existing Tomcat pid=$old_pid"
-      JAVA_HOME=$(choose_java_home)
-      export JAVA_HOME CATALINA_HOME="$TOMCAT_HOME" CATALINA_BASE="$CATALINA_BASE_DIR" CATALINA_PID="$PID_FILE"
-      "$TOMCAT_HOME/bin/catalina.sh" stop 10 -force >/dev/null 2>&1 || true
-    fi
-    rm -f "$PID_FILE"
+    pids="$pids $(cat "$PID_FILE" 2>/dev/null || true)"
   fi
+  found_pids=$(ps -axo pid=,command= 2>/dev/null | awk -v base="$CATALINA_BASE_DIR" 'index($0, base) && index($0, "org.apache.catalina.startup.Bootstrap") { print $1 }' || true)
+  pids=$(printf '%s\n%s\n' "$pids" "$found_pids" | tr ' ' '\n' | awk 'NF && !seen[$1]++ { print $1 }')
+  if [ -n "$pids" ]; then
+    for old_pid in $pids; do
+      if kill -0 "$old_pid" 2>/dev/null; then
+        log "stop existing Tomcat pid=$old_pid"
+        kill "$old_pid" 2>/dev/null || true
+      fi
+    done
+    sleep 1
+    for old_pid in $pids; do
+      if kill -0 "$old_pid" 2>/dev/null; then
+        log "force stop Tomcat pid=$old_pid"
+        kill -9 "$old_pid" 2>/dev/null || true
+      fi
+    done
+  fi
+  rm -f "$PID_FILE"
 }
 
 start_tomcat() {
@@ -234,6 +482,36 @@ start_tomcat() {
   log "CATALINA_HOME=$CATALINA_HOME"
   log "CATALINA_BASE=$CATALINA_BASE"
   "$TOMCAT_HOME/bin/catalina.sh" start
+}
+
+run_tomcat() {
+  JAVA_HOME=$(choose_java_home)
+  export JAVA_HOME
+  export CATALINA_HOME="$TOMCAT_HOME"
+  export CATALINA_BASE="$CATALINA_BASE_DIR"
+  export CATALINA_PID="$PID_FILE"
+  log "JAVA_HOME=$JAVA_HOME"
+  log "CATALINA_HOME=$CATALINA_HOME"
+  log "CATALINA_BASE=$CATALINA_BASE"
+  exec "$TOMCAT_HOME/bin/catalina.sh" run
+}
+
+stop_screen_session() {
+  if command -v screen >/dev/null 2>&1; then
+    session="${SCREEN_NAME:-jq35spring325}"
+    screen -S "$session" -X quit >/dev/null 2>&1 || true
+  fi
+}
+
+start_screen_session() {
+  if ! command -v screen >/dev/null 2>&1; then
+    log "screen command not found"
+    return 1
+  fi
+  session="${SCREEN_NAME:-jq35spring325}"
+  screen -S "$session" -X quit >/dev/null 2>&1 || true
+  log "screen session=$session"
+  screen -dmS "$session" env PORT="$PORT" "$BASE_DIR/run-spring325-tomcat7-local.sh" run
 }
 
 wait_for_health() {
@@ -258,10 +536,26 @@ case "${1:-start}" in
   stop)
     prepare_tomcat
     stop_tomcat
+    stop_screen_session
     ;;
   clean)
     stop_tomcat || true
+    stop_screen_session
     rm -rf "$WORK_DIR"
+    ;;
+  run)
+    prepare_tomcat
+    build_demo_war
+    write_tomcat_base
+    stop_tomcat || true
+    run_tomcat
+    ;;
+  screen-start)
+    prepare_tomcat
+    stop_tomcat || true
+    stop_screen_session
+    start_screen_session
+    wait_for_health
     ;;
   start|"")
     prepare_tomcat
@@ -272,7 +566,7 @@ case "${1:-start}" in
     wait_for_health
     ;;
   *)
-    echo "usage: $0 [start|stop|clean]" >&2
+    echo "usage: $0 [start|stop|clean|run|screen-start]" >&2
     exit 2
     ;;
 esac

@@ -69,7 +69,7 @@ node run-jquery35-v5.js --mode ui --port 18088
 접속 주소는 `http://127.0.0.1:18088/` 입니다.
 
 - `source`, `target`, `report`, `profile`, `rulepack`, `server-source`를 Browse로 지정하거나 직접 입력한 뒤 버튼으로 `plan`, `autofix`, `patch-jquery`, `probe`, `review-pack`, `hermes-pack`, `verify-clean`, `pr-report`, `airgap-manifest`, `release-zip`을 실행합니다.
-- source를 지정하면 TO-BE/report/profile/server-source/verify-source가 자동 산정됩니다. `Auto setup`은 같은 자동 산정을 다시 강제 적용합니다. 웹 콘솔 단계명은 `S1 분석`부터 `S10 배포 ZIP`까지 고정하고, `Run Pipeline`은 `S1→S2→S3→S6→S8→S9→Lab` 순서로 실행합니다.
+- source를 지정하면 TO-BE/report/profile/server-source/verify-source가 자동 산정됩니다. `Auto setup`은 같은 자동 산정을 다시 강제 적용합니다. 웹 콘솔 단계명은 `S1 분석`부터 `S10 배포 ZIP`까지 고정합니다. `Run Pipeline`은 `S1→S2→S3→S6→S7→S8→S9→Lab` 순서로 실행하며, S3 이후의 검수팩/검증/보고서/Local Lab은 `verify-source`(기본값 TO-BE target)를 기준으로 실행합니다.
 - `autofix`, `patch-jquery`, `probe`는 여전히 `target`이 필요합니다. 콘솔은 명령을 대신 만들어 실행해주는 껍데기이고, 안전 규칙은 CLI와 동일합니다.
 - `기존 산출물` 영역에서 `index.html`, `hermes_testbench.html`, `airgap_manifest.txt`, `pr_description.md`, `verify_clean_result.txt` 등 report 폴더의 결과물을 바로 엽니다.
 - Local Lab도 콘솔에서 시작/중지할 수 있고, Lab 보고서는 `http://127.0.0.1:<lab-port>/_report/index.html` 로 연결됩니다.
@@ -283,6 +283,8 @@ cd runtime-lab
 ```
 
 성공 기준은 `http://127.0.0.1:18089/health.do`가 `Spring 3.2.5.RELEASE`와 `Apache Tomcat/7.0.109`를 표시하는 것입니다. 다운로드/빌드 산출물은 `runtime-lab/.work/`와 `runtime-lab/inbox/app.war`에만 생성되며 Git에는 들어가지 않습니다.
+
+Codex/macOS처럼 터미널 명령이 끝난 뒤에도 백그라운드로 유지해야 하면 `./run-spring325-tomcat7-local.sh screen-start`를 사용합니다.
 
 ## 10. 외부 AI에게 전달할 때 (코드 유출 없이)
 
