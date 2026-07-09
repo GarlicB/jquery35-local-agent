@@ -16,10 +16,11 @@
 - **Hermes 로컬 검수팩(hermes-pack)** — 외부 AI 질문과 별개로 각 CASE의 정적 확인 포인트, 로컬 Probe/Lab 테스트, 통과/실패 기준, project-profile 반영 템플릿, CASE별 모킹 시험장 웹페이지를 생성. 폐쇄망 안에서 반복 검수 지식을 쌓기 위한 부품팩.
 - **공개 배포용 rulepack** — 웹루트 후보, Probe 삽입 힌트, 벤더 권고, mock 기본 응답을 `rules/*.json`으로 분리. 배포처마다 JS 코드를 고치지 않고 룰팩만 바꿔 튜닝합니다.
 - **Java/Spring 정적 증거** — Spring을 띄우지 않고 `@RequestMapping` 계열과 XML 설정을 읽어 `ajaxToServerMap.csv`, `serverEndpoints.csv`, `hermes_server_evidence.json`을 생성하고 mock route에 컨트롤러 힌트를 붙입니다.
+- **IE mode 수동 검증 시나리오** — JSP/HTML의 `id`/`class`/`name`/버튼 텍스트를 인벤토리화하고 JS selector와 매칭해, `runtime_scenarios.html`에 “어느 화면에서 무엇을 눌러볼지”를 생성합니다.
 - **폐쇄망 배포 산출물** — `airgap_manifest.json/txt`로 무의존/무통신 증빙을 남기고, `--mode release-zip`으로 공개 배포용 ZIP을 생성합니다.
 - **로컬 웹 콘솔** — `실행0_웹대시보드.bat` 또는 `--mode ui`로 브라우저에서 경로 Browse, 자동 경로 산정, plan/autofix/patch/Hermes/report 파이프라인, Local Lab, 기존 보고서 HTML 열기를 처리합니다.
 - **집계/검수 대시보드** — `index.html`에서 유형별 그래프(`event-shortcut-load` 등)와 디렉토리 depth별 분포를 먼저 보고, 파일 클릭 시 AS-IS/TO-BE 주변 코드를 모달로 비교합니다.
-- **자체 검증 내장** — `--mode self-test`가 임시 샘플 프로젝트를 만들어 전체 사이클(103개 체크)을 검증. v5.6.2는 source-only 자동 세팅, S1~S10 웹 콘솔 단계명, 경로/유형 집계, AS-IS/TO-BE 줄바꿈 보존 자동수정을 포함합니다.
+- **자체 검증 내장** — `--mode self-test`가 임시 샘플 프로젝트를 만들어 전체 사이클(112개 체크)을 검증. v5.6.3은 source-only 자동 세팅, S1~S10 웹 콘솔 단계명, 경로/유형 집계, AS-IS/TO-BE 줄바꿈 보존 자동수정, UI 요소 기반 런타임 시나리오 생성을 포함합니다.
 
 ## 빠른 시작
 

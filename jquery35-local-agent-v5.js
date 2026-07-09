@@ -7,7 +7,7 @@ const cp = require("child_process");
 const os = require("os");
 
 const TOOL_NAME = "jquery35-local-agent";
-const TOOL_VERSION = "5.6.2";
+const TOOL_VERSION = "5.6.3";
 const TARGET_JQUERY_FLOOR_VERSION = "3.5.0";
 const DEFAULT_JQUERY_VERSION = "3.5.1";
 const DEFAULT_MIGRATE_VERSION = "3.6.0";
@@ -783,9 +783,140 @@ function scriptSrcInfo(tag, tagStart) {
   return { raw: m[2], srcStart: srcStart, srcEnd: srcStart + m[2].length };
 }
 
+function blankPreserveLines(s) {
+  return String(s || "").replace(/[^\r\n]/g, " ");
+}
+
+function stripMarkupText(s) {
+  return String(s || "")
+    .replace(/<%--[\s\S]*?--%>/g, " ")
+    .replace(/<%[\s\S]*?%>/g, " ")
+    .replace(/\$\{[^}]*\}/g, " ")
+    .replace(/<script\b[\s\S]*?<\/script\s*>/ig, " ")
+    .replace(/<style\b[\s\S]*?<\/style\s*>/ig, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function decodeTextForDisplay(abs, fallback) {
+  try {
+    const buf = fs.readFileSync(abs);
+    try { return new TextDecoder("utf-8", { fatal: true }).decode(buf); } catch (e) { }
+    try { return new TextDecoder("euc-kr", { fatal: true }).decode(buf); } catch (e2) { }
+  } catch (e3) { }
+  return fallback;
+}
+
+function htmlAttrValue(raw) {
+  if (raw == null) return "";
+  let s = String(raw).trim();
+  if ((s.charAt(0) === '"' && s.charAt(s.length - 1) === '"') || (s.charAt(0) === "'" && s.charAt(s.length - 1) === "'")) {
+    s = s.slice(1, -1);
+  }
+  return s.replace(/&quot;/gi, '"').replace(/&#39;/gi, "'").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
+}
+
+function parseHtmlAttrs(attrText) {
+  const attrs = Object.create(null);
+  const re = /([A-Za-z_:][-A-Za-z0-9_:.]*)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'=<>`]+))?/g;
+  let m;
+  while ((m = re.exec(attrText || "")) !== null) {
+    attrs[m[1].toLowerCase()] = m[2] === undefined ? "" : htmlAttrValue(m[2]);
+  }
+  return attrs;
+}
+
+function labelTextFor(text, id) {
+  if (!id) return "";
+  const re = new RegExp("<label\\b[^>]*\\bfor\\s*=\\s*([\"'])" + escapeRe(id) + "\\1[^>]*>([\\s\\S]{0,240}?)<\\/label\\s*>", "i");
+  const m = re.exec(text);
+  return m ? trunc(stripMarkupText(m[2]), 80) : "";
+}
+
+function elementInnerText(text, tag, tagEnd) {
+  if (!/^(button|a|label|option|textarea|th|td)$/i.test(tag)) return "";
+  const close = new RegExp("<\\/" + escapeRe(tag) + "\\s*>", "i");
+  const slice = text.slice(tagEnd, Math.min(text.length, tagEnd + 700));
+  const m = close.exec(slice);
+  if (!m) return "";
+  return trunc(stripMarkupText(slice.slice(0, m.index)), 100);
+}
+
+function nearbyUiText(text, idx) {
+  const start = Math.max(0, idx - 320);
+  const s = text.slice(start, idx);
+  const cleaned = stripMarkupText(s);
+  if (!cleaned) return "";
+  const parts = cleaned.split(/\s+/);
+  return trunc(parts.slice(Math.max(0, parts.length - 10)).join(" "), 90);
+}
+
+function uiElementRole(tag, attrs) {
+  const t = String(tag || "").toLowerCase();
+  const typ = String(attrs.type || "").toLowerCase();
+  const idc = [attrs.id, attrs.name, attrs["class"]].join(" ").toLowerCase();
+  if (t === "button" || (t === "input" && /^(button|submit|reset|image)$/.test(typ))) return "button";
+  if (t === "input" && /^(checkbox|radio)$/.test(typ)) return "choice";
+  if (t === "select") return "select";
+  if (t === "textarea" || t === "input") return "input";
+  if (t === "a") return "link";
+  if (t === "form") return "form";
+  if (t === "table" || /\b(grid|jqgrid|list|datatable)\b/.test(idc)) return "grid-or-table";
+  if (attrs.onclick || attrs.onchange || attrs.onblur || attrs.onfocus) return "event-target";
+  return "named-container";
+}
+
+function collectUiElements(ctx) {
+  const text = decodeTextForDisplay(ctx.abs, ctx.text);
+  const lineStarts = lineStartsOf(text);
+  let scan = text
+    .replace(/<script\b[\s\S]*?<\/script\s*>/ig, blankPreserveLines)
+    .replace(/<style\b[\s\S]*?<\/style\s*>/ig, blankPreserveLines);
+  const out = [];
+  const re = /<([A-Za-z][A-Za-z0-9:-]*)\b([^<>]*?)>/g;
+  let m;
+  while ((m = re.exec(scan)) !== null) {
+    const tag = m[1].toLowerCase();
+    if (/^(script|style|meta|link|br|hr|img|jsp:|c:|fmt:|tiles:)/.test(tag)) continue;
+    if (m[0].slice(0, 2) === "</") continue;
+    const attrs = parseHtmlAttrs(m[2] || "");
+    const id = attrs.id || "";
+    const name = attrs.name || "";
+    const cls = attrs["class"] || "";
+    const hasEvent = attrs.onclick || attrs.onchange || attrs.onblur || attrs.onfocus || attrs.onkeyup || attrs.onkeydown;
+    if (!id && !name && !cls && !hasEvent && !/^(button|input|select|textarea|a|form|table)$/.test(tag)) continue;
+    const tagEnd = m.index + m[0].length;
+    const ownText = elementInnerText(text, tag, tagEnd);
+    const label = labelTextFor(text, id);
+    const display = ownText || label || attrs.title || attrs.alt || attrs.placeholder || attrs.value || nearbyUiText(text, m.index);
+    out.push({
+      page: ctx.rel,
+      line: lineOf(lineStarts, m.index),
+      tag: tag,
+      id: id,
+      name: name,
+      className: cls,
+      type: attrs.type || "",
+      text: trunc(display, 120),
+      value: trunc(attrs.value || "", 80),
+      onclick: trunc(attrs.onclick || "", 120),
+      onchange: trunc(attrs.onchange || "", 120),
+      role: uiElementRole(tag, attrs)
+    });
+  }
+  return out;
+}
+
 function collectPageStructure(ctx) {
   const text = ctx.text;
-  const refs = { scripts: [], css: [], includes: [], inlineRegions: [] };
+  const refs = { scripts: [], css: [], includes: [], inlineRegions: [], elements: [] };
   const scriptOpenRe = /<script\b[^>]*>/gi;
   let m;
   while ((m = scriptOpenRe.exec(text)) !== null) {
@@ -829,6 +960,7 @@ function collectPageStructure(ctx) {
   while ((m = tilesRe.exec(text)) !== null) {
     refs.includes.push({ raw: m[0].slice(0, 120), idx: m.index, type: "tiles", unresolvable: true });
   }
+  refs.elements = collectUiElements(ctx);
   return refs;
 }
 
@@ -1653,6 +1785,8 @@ function buildModel(opts, mode) {
     effectiveRows: [], oldCoreRefs: [], jqueryLoadRows: [],
     ajaxRows: [], syntaxRows: [], probeInjections: [], patchResults: [],
     serverFiles: [], serverEndpointRows: [], serverEvidenceRows: [], ajaxServerRows: [],
+    uiElementRows: [], selectorElementRows: [], runtimeScenarios: [],
+    uiElementsByPage: Object.create(null),
     changed: {}, editWarnings: [], git: null, counters: {}, focus: [],
     scriptInv: [], pluginInv: [], dirInv: [], completeRows: [], needsRows: [],
     wrapperRules: Object.create(null), wrapperNames: [], safeWrapperNames: Object.create(null),
@@ -1718,12 +1852,15 @@ function analyze(model) {
   annotateGroupKeys(model);
   applyLearnedFindingsOverrides(model);
   analyzePages(model);
+  buildUiElementInventory(model);
   analyzeAjax(model);
   analyzeServerEvidence(model);
   analyzeSyntax(model);
   buildInventories(model);
   dedupFindings(model);
   buildQueues(model);
+  buildSelectorElementMap(model);
+  buildRuntimeScenarios(model);
   buildReviewCases(model);
   model.git = gitInfo(model.sourceRoot);
   summarize(model);
@@ -2461,6 +2598,250 @@ function buildQueues(model) {
   });
 }
 
+function buildUiElementInventory(model) {
+  model.uiElementRows = [];
+  model.uiElementsByPage = Object.create(null);
+  model.textFiles.forEach(function (ctx) {
+    if (!ctx.isPage) return;
+    const els = ctx.refs && ctx.refs.elements ? ctx.refs.elements : [];
+    model.uiElementsByPage[ctx.rel] = els;
+    els.forEach(function (e) {
+      model.uiElementRows.push(e);
+    });
+  });
+}
+
+function normalizeSelectorText(s) {
+  return String(s || "").trim().replace(/\s+/g, " ");
+}
+
+function selectorKind(sel) {
+  const s = normalizeSelectorText(sel);
+  if (/^#[A-Za-z0-9_\-:.]+$/.test(s)) return "id";
+  if (/^\.[A-Za-z0-9_\-:.]+$/.test(s)) return "class";
+  if (/^\[name\s*=/.test(s)) return "name";
+  if (/^#\*/.test(s) || /\*$/.test(s)) return "dynamic-id";
+  if (/^[A-Za-z][A-Za-z0-9_-]*$/.test(s)) return "tag";
+  return "complex";
+}
+
+function extractSelectorsFromCode(code) {
+  const out = [];
+  const seen = Object.create(null);
+  const add = function (selector, confidence, source) {
+    selector = normalizeSelectorText(selector);
+    if (!selector || selector.length > 160) return;
+    if (selector.indexOf("<") >= 0) return;
+    const key = selector + "|" + confidence;
+    if (seen[key]) return;
+    seen[key] = 1;
+    out.push({ selector: selector, kind: selectorKind(selector), confidence: confidence, source: source || "literal" });
+  };
+  let m;
+  const literalRe = /(?:^|[^\w$])(jQuery|\$)\s*\(\s*(["'])([^"']{1,160})\2\s*[\),]/g;
+  while ((m = literalRe.exec(code || "")) !== null) add(m[3], "High", "literal");
+  const nameRe = /\[\s*name\s*=\s*(["']?)([A-Za-z0-9_.:\-]+)\1\s*\]/g;
+  while ((m = nameRe.exec(code || "")) !== null) add("[name=" + m[2] + "]", "High", "attribute");
+  const dynSuffixRe = /(?:jQuery|\$)\s*\(\s*(["'])#\1\s*\+[\s\S]{0,160}?\+\s*(["'])([#.]?[A-Za-z0-9_.:\-]+)\2\s*\)/g;
+  while ((m = dynSuffixRe.exec(code || "")) !== null) add("#*" + m[3].replace(/^#/, ""), "Medium", "dynamic-suffix");
+  const dynPrefixRe = /(?:jQuery|\$)\s*\(\s*(["'])([#.][A-Za-z0-9_.:\-]+)\1\s*\+[\s\S]{0,160}?\)/g;
+  while ((m = dynPrefixRe.exec(code || "")) !== null) add(m[2] + "*", "Medium", "dynamic-prefix");
+  return out;
+}
+
+function codeWindowForFinding(ctx, f) {
+  if (!ctx || f.idx === undefined || f.idx === null) return f.before || "";
+  const idx = parseInt(f.idx, 10);
+  if (!Number.isFinite(idx) || idx < 0) return f.before || "";
+  return ctx.text.slice(Math.max(0, idx - 320), Math.min(ctx.text.length, idx + 320));
+}
+
+function pagesForFinding(model, f) {
+  const ctx = model.ctxByRel[f.rel];
+  const out = [];
+  const add = function (p) { if (p && out.indexOf(p) < 0) out.push(p); };
+  if (ctx && ctx.isPage) add(f.rel);
+  (model.effectiveRows || []).forEach(function (r) {
+    if (r.resolved === f.rel) add(r.page);
+  });
+  (model.pageScriptRows || []).forEach(function (r) {
+    if (r.resolved === f.rel) add(r.page);
+  });
+  (model.includeRows || []).forEach(function (r) {
+    if (r.ok && r.resolved === f.rel) add(r.page);
+  });
+  return out.slice(0, 20);
+}
+
+function classTokens(s) {
+  return String(s || "").split(/\s+/).filter(Boolean);
+}
+
+function matchSelectorOnElement(selObj, el) {
+  const s = normalizeSelectorText(selObj.selector);
+  const kind = selObj.kind;
+  if (kind === "id") return el.id && ("#" + el.id) === s ? "High" : "";
+  if (kind === "class") return classTokens(el.className).indexOf(s.slice(1)) >= 0 ? "High" : "";
+  if (kind === "name") {
+    const m = /^\[name\s*=\s*['"]?([^'"\]]+)['"]?\]$/.exec(s);
+    return m && el.name === m[1] ? "High" : "";
+  }
+  if (kind === "tag") return el.tag === s.toLowerCase() ? "Low" : "";
+  if (kind === "dynamic-id") {
+    if (!el.id) return "";
+    if (/^#\*.+/.test(s)) return el.id.slice(-s.slice(2).length) === s.slice(2) ? "Medium" : "";
+    if (/^#.+\*$/.test(s)) return el.id.indexOf(s.slice(1, -1)) === 0 ? "Medium" : "";
+  }
+  return "";
+}
+
+function elementDisplayName(el) {
+  if (!el) return "";
+  const parts = [el.tag];
+  if (el.id) parts.push("#" + el.id);
+  if (el.name) parts.push("[name=" + el.name + "]");
+  const cls = classTokens(el.className).slice(0, 2);
+  if (cls.length) parts.push("." + cls.join("."));
+  const txt = el.text || el.value;
+  return parts.join("") + (txt ? " (" + trunc(txt, 40) + ")" : "");
+}
+
+function buildSelectorElementMap(model) {
+  const rows = [];
+  const rankByFinding = new Map();
+  model.focus.forEach(function (f, i) { rankByFinding.set(f, "F" + (i + 1)); });
+  model.findings.forEach(function (f, i) { if (!rankByFinding.has(f)) rankByFinding.set(f, String(i + 1)); });
+  model.findings.forEach(function (f) {
+    const ctx = model.ctxByRel[f.rel];
+    if (!ctx) return;
+    const selectors = extractSelectorsFromCode((f.before || "") + "\n" + codeWindowForFinding(ctx, f));
+    f.uiSelectors = selectors;
+    f.uiMatches = [];
+    if (selectors.length === 0) return;
+    const pages = pagesForFinding(model, f);
+    selectors.forEach(function (sel) {
+      if (pages.length === 0) {
+        rows.push({
+          findingRank: rankByFinding.get(f), rel: f.rel, line: f.line, category: f.category, priority: f.priority,
+          selector: sel.selector, selectorKind: sel.kind, page: "", element: "", role: "", confidence: "Low",
+          note: "no page candidate for this script/finding"
+        });
+        return;
+      }
+      let matched = 0;
+      pages.forEach(function (page) {
+        const els = model.uiElementsByPage[page] || [];
+        els.forEach(function (el) {
+          const conf = matchSelectorOnElement(sel, el);
+          if (!conf) return;
+          matched++;
+          const row = {
+            findingRank: rankByFinding.get(f), rel: f.rel, line: f.line, category: f.category, priority: f.priority,
+            selector: sel.selector, selectorKind: sel.kind, page: page, element: elementDisplayName(el), role: el.role,
+            confidence: conf, note: sel.source + " selector matched " + el.tag + " at line " + el.line,
+            elementRef: el
+          };
+          rows.push(row);
+          if (f.uiMatches.length < 10) f.uiMatches.push(row);
+        });
+      });
+      if (matched === 0) {
+        pages.slice(0, 5).forEach(function (page) {
+          rows.push({
+            findingRank: rankByFinding.get(f), rel: f.rel, line: f.line, category: f.category, priority: f.priority,
+            selector: sel.selector, selectorKind: sel.kind, page: page, element: "", role: "", confidence: "Low",
+            note: "selector not found in static JSP/HTML inventory"
+          });
+        });
+      }
+    });
+  });
+  model.selectorElementRows = rows;
+}
+
+function runtimeActionFor(f, match) {
+  const el = match && match.elementRef ? match.elementRef : null;
+  const target = el ? elementDisplayName(el) : (match && match.selector ? match.selector : "해당 화면 요소");
+  if (f.category.indexOf("bool-attr") === 0) {
+    if (el && el.role === "choice") return target + " 체크/해제 상태가 기존 1.10 화면과 같은지 확인합니다.";
+    return target + " 활성/비활성 상태를 초기 진입, 필수값 입력 후, 행 선택 후 각각 확인합니다.";
+  }
+  if (f.category === "bind-to-on" || f.category === "unbind-to-off" || f.category === "live-die" || f.category.indexOf("event-shortcut") === 0) {
+    return target + "를 3회 반복 조작하고 이벤트가 0회/중복 실행되지 않는지 확인합니다.";
+  }
+  if (f.category === "jqxhr-shorthand") {
+    return "해당 화면에서 조회/저장/삭제 등 AJAX 동작을 1회 성공, 가능하면 1회 실패 조건으로 실행합니다.";
+  }
+  if (f.category === "dom-sink" || f.category === "wrapper-dom-sink" || f.category === "dom-factory" || f.category === "parse-html") {
+    return "서버/사용자 값이 표시되는 영역에서 깨짐, 원치 않는 HTML 해석, 스크립트 실행 가능성이 없는지 확인합니다.";
+  }
+  if (f.priority === "Critical" || f.category.indexOf("jquery-core") === 0) {
+    return "페이지를 열고 jQuery/Migrate 로드 순서와 JQ35 Probe의 jQuery 버전, JS error, JQMIGRATE 경고를 확인합니다.";
+  }
+  return target + "가 포함된 업무 흐름을 기존과 동일하게 1회 이상 수행합니다.";
+}
+
+function runtimePassFor(f) {
+  if (f.category.indexOf("bool-attr") === 0) return "활성/비활성, checked/selected 상태가 기존 화면과 동일하고 JS error/AJAX error가 없습니다.";
+  if (f.category === "bind-to-on" || f.category === "unbind-to-off" || f.category === "live-die") return "클릭/변경 이벤트가 정확히 1회 실행되고 재진입/재조회 후에도 중복 실행이 없습니다.";
+  if (f.category === "jqxhr-shorthand") return "성공/실패 메시지와 callback 인자 처리 결과가 기존과 같고 Probe AJAXERROR가 없습니다.";
+  if (f.priority === "XssHigh") return "업무상 필요한 HTML만 신뢰 경계 안에서 표시되고, 사용자/서버 데이터가 임의 HTML로 실행되지 않습니다.";
+  return "화면 동작이 기존과 같고 Probe E=0, 필요한 경우 JQMIGRATE 경고가 기록/해소됩니다.";
+}
+
+function runtimeFailFor(f) {
+  if (f.category.indexOf("bool-attr") === 0) return "버튼이 계속 비활성/활성으로 남거나 체크 상태가 반대로 동작합니다.";
+  if (f.category === "bind-to-on" || f.category === "unbind-to-off" || f.category === "live-die") return "이벤트가 실행되지 않거나 한 번 조작에 두 번 이상 실행됩니다.";
+  if (f.category === "jqxhr-shorthand") return "조회/저장 AJAX가 실패하거나 성공/실패 메시지가 기존과 달라집니다.";
+  if (f.priority === "XssHigh") return "입력값/서버값이 HTML로 해석되거나 의도치 않은 태그/스크립트 실행 흔적이 있습니다.";
+  return "JS error, AJAX error, 화면 깨짐, 기존과 다른 업무 결과가 발생합니다.";
+}
+
+function buildRuntimeScenarios(model) {
+  const candidates = [];
+  const seen = Object.create(null);
+  function addFindingCandidate(f) {
+    const k = f.rel + "|" + f.line + "|" + f.category + "|" + f.pattern;
+    if (seen[k]) return;
+    seen[k] = 1;
+    candidates.push(f);
+  }
+  model.focus.slice(0, 200).forEach(addFindingCandidate);
+  model.findings.filter(isChangedAutoFinding).slice(0, 200).forEach(addFindingCandidate);
+  model.oldCoreRefs.slice(0, 80).forEach(function (r) {
+    const f = model.findings.filter(function (x) { return x.rel === r.page && x.line === r.line && x.priority === "Critical"; })[0];
+    if (f) addFindingCandidate(f);
+  });
+  const scenarios = [];
+  candidates.forEach(function (f) {
+    const pages = pagesForFinding(model, f);
+    const matches = f.uiMatches || [];
+    const primaryMatch = matches[0] || null;
+    const page = primaryMatch ? primaryMatch.page : (pages[0] || (model.ctxByRel[f.rel] && model.ctxByRel[f.rel].isPage ? f.rel : ""));
+    const selectors = (f.uiSelectors || []).map(function (s) { return s.selector; }).slice(0, 4).join(" | ");
+    const confidence = primaryMatch ? primaryMatch.confidence : (page ? "Medium" : "Low");
+    scenarios.push({
+      id: "RT-" + String(scenarios.length + 1).padStart(4, "0"),
+      stage: focusStageKey(f),
+      page: page,
+      findingRel: f.rel,
+      line: f.line,
+      category: f.category,
+      priority: f.priority,
+      confidence: confidence,
+      selector: selectors,
+      uiTarget: primaryMatch ? primaryMatch.element : "",
+      role: primaryMatch ? primaryMatch.role : "",
+      why: f.reason,
+      action: runtimeActionFor(f, primaryMatch),
+      passWhen: runtimePassFor(f),
+      failWhen: runtimeFailFor(f),
+      probeCheck: "Edge IE mode에서 JQ35 배지 E/M 수치, jQuery 버전, JQMIGRATE warning, JSERROR/AJAXERROR 로그를 저장합니다."
+    });
+  });
+  model.runtimeScenarios = scenarios;
+}
+
 function isAmbiguousFinding(f) {
   if (f.thirdParty === "Y") return false;
   if (f.priority === "Review") return true;
@@ -2771,6 +3152,9 @@ function summarize(model) {
     ServerFiles: model.serverFiles.length,
     ServerEndpoints: model.serverEndpointRows.length,
     AjaxMappedToServer: model.ajaxServerRows.filter(function (r) { return r.matched === "Y"; }).length,
+    UiElements: model.uiElementRows.length,
+    SelectorElementRows: model.selectorElementRows.length,
+    RuntimeScenarios: model.runtimeScenarios.length,
     JsSyntaxFail: model.syntaxRows.filter(function (r) { return r.result === "FAIL"; }).length,
     LibraryCounts: JSON.stringify(libCounts),
     GitInfo: model.git && model.git.available ? (model.git.branch + " changed=" + model.git.changed.length + " untracked=" + model.git.untracked.length) : "Unavailable",
@@ -3242,6 +3626,30 @@ function writeCsvReports(model) {
   writeCsv(path.join(R, "ajaxToServerMap.csv"),
     ["RelativePath", "LineNumber", "AjaxMethod", "AjaxUrl", "Matched", "ServerMethod", "ServerPath", "Handler", "EvidenceFile", "EvidenceLine", "Confidence", "Note"],
     model.ajaxServerRows.map(function (r) { return [r.rel, r.line, r.ajaxMethod, r.ajaxUrl, r.matched, r.serverMethod, r.serverPath, r.handler, r.evidenceFile, r.evidenceLine, r.confidence, r.note]; }));
+  writeCsv(path.join(R, "uiElementInventory.csv"),
+    ["PagePath", "LineNumber", "Tag", "Id", "Name", "Class", "Type", "Text", "Value", "OnClick", "OnChange", "Role"],
+    model.uiElementRows.map(function (e) { return [e.page, e.line, e.tag, e.id, e.name, e.className, e.type, e.text, e.value, e.onclick, e.onchange, e.role]; }));
+  writeCsv(path.join(R, "selectorElementMap.csv"),
+    ["FindingRank", "RelativePath", "LineNumber", "Category", "Priority", "Selector", "SelectorKind", "PagePath", "MatchedElement", "Role", "Confidence", "Note"],
+    model.selectorElementRows.map(function (r) { return [r.findingRank, r.rel, r.line, r.category, r.priority, r.selector, r.selectorKind, r.page, r.element, r.role, r.confidence, r.note]; }));
+  writeCsv(path.join(R, "runtimeScenarios.csv"),
+    ["ScenarioId", "Stage", "PagePath", "FindingPath", "LineNumber", "Category", "Priority", "Confidence", "Selector", "UiTarget", "Role", "Why", "Action", "PassWhen", "FailWhen", "ProbeCheck"],
+    model.runtimeScenarios.map(function (r) { return [r.id, r.stage, r.page, r.findingRel, r.line, r.category, r.priority, r.confidence, r.selector, r.uiTarget, r.role, r.why, r.action, r.passWhen, r.failWhen, r.probeCheck]; }));
+  writeUtf8(path.join(R, "runtime_scenarios.json"), JSON.stringify({
+    tool: TOOL_NAME,
+    version: TOOL_VERSION,
+    generated: true,
+    uiElementCount: model.uiElementRows.length,
+    selectorElementRows: model.selectorElementRows.map(function (r) {
+      return {
+        findingRank: r.findingRank, rel: r.rel, line: r.line, category: r.category, priority: r.priority,
+        selector: r.selector, selectorKind: r.selectorKind, page: r.page, element: r.element, role: r.role,
+        confidence: r.confidence, note: r.note
+      };
+    }),
+    scenarios: model.runtimeScenarios
+  }, null, 2) + "\n", false);
+  writeRuntimeScenariosHtml(model);
   writeUtf8(path.join(R, "hermes_server_evidence.json"), JSON.stringify({
     generated: true,
     serverFiles: model.serverFiles,
@@ -3304,6 +3712,10 @@ function writeXls(model) {
     model.serverEndpointRows.slice(0, 2000).map(function (r) { return [r.rel, r.line, r.httpMethod, r.path, r.className + "#" + r.methodName, r.responseBody]; })));
   sheets.push(xlsSheet("AjaxToServer", ["RelativePath", "Line", "Ajax", "Matched", "Handler", "Confidence"],
     model.ajaxServerRows.slice(0, 2000).map(function (r) { return [r.rel, r.line, r.ajaxMethod + " " + r.ajaxUrl, r.matched, r.handler, r.confidence]; })));
+  sheets.push(xlsSheet("RuntimeScenarios", ["ScenarioId", "Stage", "Page", "Finding", "Category", "Priority", "Target", "Action", "PassWhen"],
+    model.runtimeScenarios.slice(0, 2000).map(function (r) { return [r.id, stageLabel(r.stage), r.page, r.findingRel + ":" + r.line, r.category, r.priority, r.uiTarget || r.selector, r.action, r.passWhen]; })));
+  sheets.push(xlsSheet("SelectorMap", ["Finding", "Selector", "Page", "Element", "Role", "Confidence"],
+    model.selectorElementRows.slice(0, 2000).map(function (r) { return [r.rel + ":" + r.line, r.selector, r.page, r.element, r.role, r.confidence]; })));
   const doc = ['<?xml version="1.0" encoding="UTF-8"?>',
     '<?mso-application progid="Excel.Sheet"?>',
     '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">',
@@ -3329,6 +3741,32 @@ function tableHtml(header, rows, rawCells) {
     h += "</tr>";
   });
   return h + "</tbody></table></div>";
+}
+function stageLabel(key) {
+  if (key === "min") return "1차 최소";
+  if (key === "compat") return "2차 안정화";
+  if (key === "max") return "3차 최대/후속";
+  return key || "";
+}
+function writeRuntimeScenariosHtml(model) {
+  const parts = [];
+  parts.push("<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\"><title>IE mode runtime scenarios</title><style>");
+  parts.push("*{box-sizing:border-box}body{font-family:'Malgun Gothic',AppleGothic,sans-serif;margin:0;background:#f1f4f8;color:#202733}.wrap{max-width:1360px;margin:0 auto;padding:22px}.top{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:18px 20px;display:flex;justify-content:space-between;gap:18px}.eyebrow{font-size:11px;font-weight:800;color:#5b6677;text-transform:uppercase}h1{font-size:22px;margin:4px 0 0}.sub{font-size:12px;color:#5b6677;margin-top:8px}.pill{display:inline-block;border:1px solid #d7ddea;border-radius:999px;background:#f7f9fc;padding:5px 9px;font-size:12px;margin-left:5px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:16px}.card{background:#fff;border:1px solid #d8dee8;border-left:4px solid #607d8b;border-radius:8px;padding:13px;box-shadow:0 5px 16px rgba(31,41,55,.04)}.card.min{border-left-color:#b42318}.card.compat{border-left-color:#b54708}.card.max{border-left-color:#4e5f70}.head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.id{font-weight:800;color:#101828}.meta{font-size:11px;color:#667085;text-align:right}.path{font-size:12px;color:#1a5fb4;word-break:break-all;margin-top:7px}.kv{display:grid;grid-template-columns:92px 1fr;gap:6px 10px;font-size:12px;margin-top:10px}.kv b{color:#475467}.action{background:#f8fafc;border:1px solid #e3e8f0;border-radius:8px;padding:9px;margin-top:10px;font-size:13px}.small{font-size:12px;color:#667085}.copy{white-space:pre-wrap;font:12px/1.45 Consolas,Menlo,monospace;background:#0b1020;color:#d6e4ff;border-radius:8px;padding:10px;margin-top:14px;overflow:auto}@media(max-width:900px){.grid{grid-template-columns:1fr}.top{display:block}.pill{margin:10px 5px 0 0}}");
+  parts.push("</style></head><body><main class=\"wrap\">");
+  parts.push("<section class=\"top\"><div><div class=\"eyebrow\">" + htmlEsc(TOOL_NAME + " v" + TOOL_VERSION) + "</div><h1>Edge IE mode 수동 런타임 검증 시나리오</h1><div class=\"sub\">정적 스캔 후보를 JSP/HTML 요소와 연결해 사람이 로컬/개발계 브라우저에서 확인할 동작으로 바꾼 목록입니다.</div></div><div><span class=\"pill\">scenarios " + htmlEsc(model.runtimeScenarios.length) + "</span><span class=\"pill\">ui elements " + htmlEsc(model.uiElementRows.length) + "</span><span class=\"pill\">selector rows " + htmlEsc(model.selectorElementRows.length) + "</span></div></section>");
+  parts.push("<div class=\"grid\">");
+  model.runtimeScenarios.slice(0, 300).forEach(function (s) {
+    parts.push("<article class=\"card " + htmlEsc(s.stage) + "\"><div class=\"head\"><div><div class=\"id\">" + htmlEsc(s.id) + " " + htmlEsc(stageLabel(s.stage)) + "</div><div class=\"path\">" + htmlEsc(s.page || s.findingRel) + "</div></div><div class=\"meta\">" + htmlEsc(s.priority) + "<br>" + htmlEsc(s.category) + "<br>" + htmlEsc(s.confidence) + "</div></div>");
+    parts.push("<div class=\"kv\"><b>근거</b><span>" + htmlEsc(s.findingRel + ":" + s.line) + "</span><b>selector</b><span>" + htmlEsc(s.selector || "-") + "</span><b>대상</b><span>" + htmlEsc(s.uiTarget || "-") + "</span><b>역할</b><span>" + htmlEsc(s.role || "-") + "</span></div>");
+    parts.push("<div class=\"action\"><b>동작</b><br>" + htmlEsc(s.action) + "</div>");
+    parts.push("<div class=\"kv\"><b>통과</b><span>" + htmlEsc(s.passWhen) + "</span><b>실패</b><span>" + htmlEsc(s.failWhen) + "</span><b>Probe</b><span>" + htmlEsc(s.probeCheck) + "</span></div></article>");
+  });
+  parts.push("</div><h2 class=\"small\">복붙용 압축 텍스트</h2><div class=\"copy\">");
+  model.runtimeScenarios.slice(0, 120).forEach(function (s) {
+    parts.push(htmlEsc([s.id, stageLabel(s.stage), s.page || s.findingRel, s.category, s.priority, "DO=" + s.action, "PASS=" + s.passWhen].join(" | ")));
+  });
+  parts.push("</div></main></body></html>");
+  writeUtf8(path.join(model.reportRoot, "runtime_scenarios.html"), parts.join("\n"), false);
 }
 function scriptJson(v) {
   return JSON.stringify(v).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
@@ -3633,6 +4071,14 @@ function writeIndexHtml(model) {
   parts.push("<h2>단계별 조치 큐 (로드맵 + FocusQueue 상위 100건)</h2>");
   parts.push('<div class="small queueHint">1차 최소부터 확인하세요. 각 단계 안에서 목표와 멈춤 기준을 보고, 파일명을 클릭하면 AS-IS/TO-BE 주변 코드와 확인 포인트가 모달로 열립니다.</div>');
   parts.push(focusQueueHtml(model, focusDetails, autoDetails));
+  if (model.runtimeScenarios.length > 0) {
+    parts.push("<h2>Edge IE mode 수동 검증 시나리오</h2>");
+    parts.push('<div class="small">IEDriver 없이도 로컬/개발계 브라우저에서 사람이 확인할 동작입니다. 상세: ' + reportLink("runtime_scenarios.html", "runtime_scenarios.html") + " / " + reportLink("runtimeScenarios.csv", "runtimeScenarios.csv") + " / " + reportLink("selectorElementMap.csv", "selectorElementMap.csv") + "</div>");
+    parts.push(tableHtml(["ID", "단계", "화면/파일", "대상", "유형", "동작", "통과 기준"],
+      model.runtimeScenarios.slice(0, 20).map(function (s) {
+        return [s.id, stageLabel(s.stage), s.page || s.findingRel, s.uiTarget || s.selector || "-", s.category, s.action, s.passWhen];
+      })));
+  }
   parts.push("<details><summary>상세 표 펼치기</summary><div class=\"detailBlock\">");
   parts.push("<h2>1차 상세: " + TARGET_JQUERY_FLOOR_VERSION + " 미만 jQuery core 호출부 (" + model.oldCoreRefs.length + "건)</h2>");
   parts.push(tableHtml(["페이지", "라인", "src", "버전"], model.oldCoreRefs.map(function (r) { return [r.page, r.line, r.raw, r.meta.ver]; })));
@@ -3697,7 +4143,7 @@ function packetLines(model) {
     "ChangedFiles", "ApiFindings", "Critical", "AutoFixed", "AutoInferred", "Review", "Manual", "XssHigh", "FocusQueue",
     "VendorReview", "StaticHtmlLow", "JqueryLoads", "OldJqueryBelow350", "PageRiskMultipleJqueryCore",
     "PageRiskOldJqueryCore", "PageRiskMigrateMissing", "PageRiskMigrateBeforeCore", "UnresolvedRefs", "AjaxEndpoints", "JsSyntaxFail",
-    "ServerFiles", "ServerEndpoints", "AjaxMappedToServer", "ReviewCasesTotal", "ReviewCasesInPack", "LearnedWrapperCount", "LearnedFindingOverrides",
+    "ServerFiles", "ServerEndpoints", "AjaxMappedToServer", "UiElements", "SelectorElementRows", "RuntimeScenarios", "ReviewCasesTotal", "ReviewCasesInPack", "LearnedWrapperCount", "LearnedFindingOverrides",
     "LibraryCounts", "GitInfo", "OldJquerySrcs"].forEach(function (k) {
       L.push(k + "=" + c[k]);
     });
@@ -3732,6 +4178,9 @@ function packetLines(model) {
   L.push("");
   L.push("TopPluginInventory:");
   uniq(model.pluginInv.map(function (r) { return r[1] + (r[2] ? " v" + r[2] : ""); })).slice(0, 20).forEach(function (p) { L.push("  " + p); });
+  L.push("");
+  L.push("TopRuntimeScenarios:");
+  model.runtimeScenarios.slice(0, 20).forEach(function (r) { L.push("  " + r.id + ":" + stageLabel(r.stage) + ":" + (r.page || r.findingRel) + ":" + r.category + " -> " + r.action); });
   L.push("");
   L.push("RecommendedNextActions:");
   recommendedActions(model).forEach(function (a, i) { L.push("  " + (i + 1) + ". " + a); });
@@ -3901,6 +4350,7 @@ function writeRuntimeChecklist(model) {
   L.push("1. Eclipse/Tomcat 기동 후 아래 페이지 접속");
   L.push("2. 화면 우측 하단 JQ35 배지 클릭 -> 패널에서 E(에러)/M(마이그레이트 경고) 수치 확인");
   L.push("3. Copy 버튼으로 로그 복사 후 기록");
+  L.push("4. runtime_scenarios.html의 시나리오를 1차 최소 -> 2차 안정화 -> 3차 최대/후속 순서로 수행");
   L.push("");
   L.push("[jQuery core를 로드하는 페이지 목록]");
   model.pages.filter(function (p) { return p.hasCore; }).forEach(function (p) {
@@ -3912,6 +4362,11 @@ function writeRuntimeChecklist(model) {
   L.push("- JS error 0건");
   L.push("- AJAX error 없음");
   L.push("- jqGrid/select2/autoNumeric/datepicker 동작");
+  L.push("");
+  L.push("[자동 생성 시나리오 상위 " + Math.min(30, model.runtimeScenarios.length) + "건]");
+  model.runtimeScenarios.slice(0, 30).forEach(function (s) {
+    L.push("- " + s.id + " " + stageLabel(s.stage) + " " + (s.page || s.findingRel) + " :: " + s.action + " / PASS: " + s.passWhen);
+  });
   writeUtf8(path.join(model.reportRoot, "runtime_test_checklist.txt"), L.join("\r\n") + "\r\n", true);
 }
 
@@ -4527,6 +4982,7 @@ function writeAllReports(model, extra) {
   if (extra && extra.pr) writePrReport(model);
   log("report written: " + model.reportRoot);
   log("  - index.html (dashboard), summary.csv, apiFindings.csv, findingCategorySummary.csv, directoryRiskSummary.csv, focusQueue.csv, jquery35_report.xls");
+  log("  - runtime_scenarios.html / runtimeScenarios.csv / uiElementInventory.csv / selectorElementMap.csv");
   log("  - assistant_packet.txt / chat_summary.txt / airgap_manifest.txt");
 }
 const MIME = {
@@ -5370,7 +5826,10 @@ const ST_LIST_JSP = [
   '<%@ page contentType="text/html; charset=UTF-8" %>',
   '<%@ include file="../../layouts/common_script_lib.jsp" %>',
   "<html><body>",
-  '<div id="grid"></div><select id="opt"></select>',
+  '<div id="grid" class="jqGrid"></div><select id="opt"></select>',
+  '<button id="lineDel" class="btn danger">Delete</button>',
+  '<button id="btn1" class="btn">Search</button><span id="cnt"></span><div id="rows"></div>',
+  '<input id="chk" name="chk" type="checkbox"><input id="inp" name="inp" readonly="readonly"><input id="inp2" name="inp2" readonly="readonly">',
   "<script>",
   "$(document).ready(function(){",
   '  $("#btn1").bind("click", function(){ $("#cnt").text($("#rows").size()); });',
@@ -5524,9 +5983,19 @@ function selfTest(opts) {
       trimPlanFinding ? JSON.stringify([trimPlanFinding.priority, trimPlanFinding.action]) : "finding not found");
     check("effective include resolved (list.jsp sees layout core)", m1.pages.some(function (p) { return p.rel.indexOf("views/sample/list.jsp") >= 0 && p.oldCore && p.effectiveScripts >= 3; }), "");
     check("function-bind not touched (onRow.bind)", !m1.findings.some(function (f) { return f.rel === "js/util.js" && f.category === "bind-to-on" && f.action === "Changed" && f.line >= 16; }), "");
-    ["summary.csv", "apiFindings.csv", "findingCategorySummary.csv", "directoryRiskSummary.csv", "focusQueue.csv", "critical.csv", "xssHigh.csv", "assistant_packet.txt", "chat_summary.txt", "index.html", "jquery35_report.xls", "jspPages.csv", "pageScriptEffective.csv", "ajaxEndpoints.csv", "serverEndpoints.csv", "ajaxToServerMap.csv", "hermes_server_evidence.json", "airgap_manifest.json", "airgap_manifest.txt", "mock_routes.json"].forEach(function (f) {
+    ["summary.csv", "apiFindings.csv", "findingCategorySummary.csv", "directoryRiskSummary.csv", "focusQueue.csv", "critical.csv", "xssHigh.csv", "assistant_packet.txt", "chat_summary.txt", "index.html", "jquery35_report.xls", "jspPages.csv", "pageScriptEffective.csv", "ajaxEndpoints.csv", "serverEndpoints.csv", "ajaxToServerMap.csv", "uiElementInventory.csv", "selectorElementMap.csv", "runtimeScenarios.csv", "runtime_scenarios.json", "runtime_scenarios.html", "hermes_server_evidence.json", "airgap_manifest.json", "airgap_manifest.txt", "mock_routes.json"].forEach(function (f) {
       check("report file " + f, exists(path.join(r1, f)), "");
     });
+    check("ui element inventory captures buttons/inputs",
+      m1.uiElementRows.some(function (e) { return e.id === "lineDel" && e.role === "button" && e.text.indexOf("Delete") >= 0; }) &&
+      m1.uiElementRows.some(function (e) { return e.id === "chk" && e.role === "choice"; }),
+      JSON.stringify(m1.uiElementRows.slice(0, 8)));
+    check("selector map links #lineDel to JSP element",
+      m1.selectorElementRows.some(function (r) { return r.selector === "#lineDel" && r.element.indexOf("button#lineDel") >= 0 && r.page.indexOf("views/sample/list.jsp") >= 0; }),
+      JSON.stringify(m1.selectorElementRows.slice(0, 12).map(function (r) { return [r.selector, r.page, r.element, r.confidence]; })));
+    check("runtime scenarios generated from selector/page evidence",
+      m1.runtimeScenarios.length > 0 && m1.runtimeScenarios.some(function (s) { return s.uiTarget.indexOf("lineDel") >= 0 && s.action.indexOf("활성/비활성") >= 0; }),
+      JSON.stringify(m1.runtimeScenarios.slice(0, 8).map(function (s) { return [s.id, s.page, s.uiTarget, s.action]; })));
     const mockRoutes = JSON.parse(readUtf8(path.join(r1, "mock_routes.json")));
     check("mock route carries server handler evidence", mockRoutes.routes.some(function (r) { return r.serverMatched === true && r.handler.indexOf("SampleController#list") >= 0; }), JSON.stringify(mockRoutes));
     const indexHtml = readUtf8(path.join(r1, "index.html"));
@@ -5534,6 +6003,7 @@ function selfTest(opts) {
     check("dashboard staged action queue present", indexHtml.indexOf("단계별 조치 큐") >= 0 && indexHtml.indexOf("조치 범위 로드맵</h2>") < 0 && indexHtml.indexOf("단계별 FocusQueue") < 0 && indexHtml.indexOf("1차 최소") >= 0 && indexHtml.indexOf("2차 안정화") >= 0 && indexHtml.indexOf("3차 최대/후속") >= 0, "");
     check("dashboard stage counts split total auto queue", indexHtml.indexOf("<span>전체</span>") >= 0 && indexHtml.indexOf("<span>자동</span>") >= 0 && indexHtml.indexOf("<span>큐</span>") >= 0, "");
     check("dashboard category and directory summaries present", indexHtml.indexOf("유형/경로 분포") >= 0 && indexHtml.indexOf("event-shortcut-load") >= 0 && indexHtml.indexOf("directoryRiskSummary.csv") >= 0, "");
+    check("dashboard links runtime scenarios", indexHtml.indexOf("Edge IE mode 수동 검증 시나리오") >= 0 && indexHtml.indexOf("runtime_scenarios.html") >= 0, "");
 
     log("self-test 2/8: autofix");
     const m2 = buildModel(mk({ source: src, target: t1, report: r1 }), "autofix");
