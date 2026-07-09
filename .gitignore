@@ -7,3 +7,4 @@ probeLogs/
 runtime-lab/inbox/*
 !runtime-lab/inbox/README.txt
 runtime-lab/logs/
+runtime-lab/.work/

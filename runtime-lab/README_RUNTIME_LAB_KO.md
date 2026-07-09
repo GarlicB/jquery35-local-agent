@@ -36,6 +36,46 @@ http://127.0.0.1:18089/
 docker compose -f docker-compose.tomcat7.yml down
 ```
 
+## Spring 3.2.5 + Tomcat 7 로컬 스모크
+
+Docker 없이 이 Mac/Codex 프로젝트 안에서 Spring 3.2.5.RELEASE + Tomcat 7.0.109가 실제로 뜨는지 확인하려면:
+
+```sh
+cd runtime-lab
+./run-spring325-tomcat7-local.sh start
+```
+
+확인 URL:
+
+```text
+http://127.0.0.1:18089/health.do
+```
+
+성공하면 응답에 다음 값이 나옵니다.
+
+- Spring `3.2.5.RELEASE`
+- Servlet container `Apache Tomcat/7.0.109`
+- Java version
+- Request URI `/health.do`
+
+중지:
+
+```sh
+cd runtime-lab
+./run-spring325-tomcat7-local.sh stop
+```
+
+정리:
+
+```sh
+cd runtime-lab
+./run-spring325-tomcat7-local.sh clean
+```
+
+이 스크립트는 `runtime-lab/.work/` 아래에만 Tomcat과 jar를 내려받고, `runtime-lab/inbox/app.war`에 데모 WAR를 만듭니다. 두 경로는 Git에 커밋되지 않습니다.
+
+주의: macOS의 Java 17/21에서 Tomcat 7의 오래된 JSP 컴파일러는 최신 JDK 클래스 포맷을 읽다가 실패할 수 있습니다. 이 랩은 그 문제를 피하려고 JSP view 대신 Spring MVC Controller가 직접 health HTML을 응답하게 구성했습니다. JSP 자체 호환성은 회사의 JDK 8/Tomcat 7 또는 실제 WAS에서 별도 확인하세요.
+
 ## JDK/Tomcat 직접 방식
 
 Docker가 없으면 JDK 8과 Tomcat 7을 직접 설치한 뒤 WAR를 Tomcat `webapps/ROOT.war`에 배치해도 됩니다.

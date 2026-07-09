@@ -5252,6 +5252,7 @@ function releaseCandidateFiles() {
 	    "runtime-lab/Dockerfile.tomcat7",
 	    "runtime-lab/run-runtime-lab.sh",
 	    "runtime-lab/run-runtime-lab.bat",
+	    "runtime-lab/run-spring325-tomcat7-local.sh",
 	    "runtime-lab/inbox/README.txt"
 	  ];
   const rulesDir = path.join(root, "rules");
